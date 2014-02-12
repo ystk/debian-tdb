@@ -1,3 +1,113 @@
+tdb (1.2.10-2) unstable; urgency=high
+
+  [ Ivo De Decker ]
+  * Make transaction-expand test non-fatal. Fixes FTBFS. Closes: #674749
+  * Fix version in symbols file to make lintian happy.
+
+ -- Jelmer Vernooij <jelmer@debian.org>  Mon, 28 May 2012 00:16:23 +0200
+
+tdb (1.2.10-1.1) unstable; urgency=high
+
+  * Fix version in symbols file to make lintian happy.
+
+ -- Ivo De Decker <ivo.dedecker@ugent.be>  Sun, 27 May 2012 12:55:11 +0200
+
+tdb (1.2.10-1) unstable; urgency=low
+
+  * debian/rules: Remove unnecessary clean: target.
+  * Properly clean up after building.
+  * New upstream release.
+
+ -- Jelmer Vernooij <jelmer@debian.org>  Wed, 11 Apr 2012 15:46:13 +0200
+
+tdb (1.2.9+git20120207-2) unstable; urgency=low
+
+  * Bump standards version to 3.9.3 (no changes).
+  * Use parseable format for copyright file.
+
+ -- Jelmer Vernooij <jelmer@debian.org>  Tue, 28 Feb 2012 15:45:33 +0100
+
+tdb (1.2.9+git20120207-1) unstable; urgency=low
+
+  * New upstream snapshot.
+   + Unpacks waf sourcecode. Closes: #654509
+   + Fixes build issues when IOV_MAX is not available, as is
+     the case on Hurd systems. Closes: #657021
+
+ -- Jelmer Vernooij <jelmer@debian.org>  Tue, 07 Feb 2012 14:38:34 +0100
+
+tdb (1.2.9-4) unstable; urgency=low
+
+  * Explicitly use dh_python2.
+  * Use system Python. Closes: #577435
+
+ -- Jelmer Vernooij <jelmer@debian.org>  Sun, 25 Sep 2011 19:13:08 +0200
+
+tdb (1.2.9-3) unstable; urgency=low
+
+  * Upload to unstable.
+  * Use new style debhelper.
+
+ -- Jelmer Vernooij <jelmer@debian.org>  Thu, 28 Jul 2011 16:30:26 +0200
+
+tdb (1.2.9-2) experimental; urgency=low
+
+  * Add python-tdb-dbg and libtdb1-dbg packages.
+  * Bump standards version to 3.9.2.
+  * Use --disable-rpath-install only, simplifies testsuite running.
+  * Switch from dh_pycentral to dh_python2. Closes: #617120
+  * Drop transitional package tdb-dev.
+  * Add support for multiarch to libtdb1.
+
+ -- Jelmer Vernooij <jelmer@debian.org>  Tue, 26 Jul 2011 20:36:40 +0200
+
+tdb (1.2.9-1) unstable; urgency=low
+
+  * New upstream release.
+
+ -- Jelmer Vernooij <jelmer@debian.org>  Sun, 23 Jan 2011 22:23:33 -0800
+
+tdb (1.2.8-1) unstable; urgency=low
+
+  * New upstream release.
+   + Introduces symbol versioning.
+  * Switch to python-support.
+  * Run testsuite during build.
+  * Link with --as-needed.
+
+ -- Jelmer Vernooij <jelmer@debian.org>  Tue, 21 Dec 2010 19:30:08 +0100
+
+tdb (1.2.7+git20101021-1) unstable; urgency=low
+
+  * New upstream snapshot.
+   + Removes use of _PUBLIC_ from tdb.h. Closes: #600898
+
+ -- Jelmer Vernooij <jelmer@debian.org>  Thu, 21 Oct 2010 16:38:46 +0200
+
+tdb (1.2.7-1) unstable; urgency=low
+
+  * New upstream release.
+
+ -- Jelmer Vernooij <jelmer@debian.org>  Mon, 04 Oct 2010 21:55:48 +0200
+
+tdb (1.2.3~git20100819-1) experimental; urgency=low
+
+  * New upstream snapshot.
+  * Bump standards version to 3.9.1 (no changes).
+  * Switch to bzr.
+
+ -- Jelmer Vernooij <jelmer@debian.org>  Sun, 22 Aug 2010 14:21:07 +0200
+
+tdb (1.2.2~git20100507-1) experimental; urgency=low
+
+  * New upstream snapshot.
+  * Build with standard system python. Closes: #577435
+  * Remove `tdb_transaction_recover` symbol which was also removed upstream. 
+    This symbol was never intended to be public and would have been hard to 
+    use anyway.
+
+ -- Jelmer Vernooij <jelmer@debian.org>  Thu, 13 May 2010 18:42:16 +0200
+
 tdb (1.2.1-2) unstable; urgency=low
 
   * Add missing build dependency on xsltproc, docbook-xsl. Closes:
@@ -37,6 +147,12 @@ tdb (1.1.5-1) unstable; urgency=low
   * New upstream release.
 
  -- Jelmer Vernooij <jelmer@debian.org>  Wed, 17 Jun 2009 16:57:30 +0200
+
+tdb (1.1.4~git20090604-1) experimental; urgency=low
+
+  * New upstream snapshot.
+
+ -- Jelmer Vernooij <jelmer@debian.org>  Fri, 05 Jun 2009 00:54:27 +0200
 
 tdb (1.1.3-1) unstable; urgency=low
 
@@ -272,6 +388,3 @@ tdb (1.0.3-1) unstable; urgency=low
 
  -- Marek Habersack <grendel@debian.org>  Mon,  7 May 2001 18:03:17 +0200
 
-Local variables:
-mode: debian-changelog
-End:

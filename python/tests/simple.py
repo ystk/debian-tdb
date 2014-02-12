@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # Some simple tests for the Python bindings for TDB
 # Note that this tests the interface of the Python bindings
 # It does not test tdb itself.
@@ -12,12 +12,21 @@ import os, tempfile
 
 
 class OpenTdbTests(TestCase):
+
     def test_nonexistant_read(self):
-        self.assertRaises(IOError, tdb.Tdb, "/some/nonexistant/file", 0, tdb.DEFAULT, os.O_RDWR)
+        self.assertRaises(IOError, tdb.Tdb, "/some/nonexistant/file", 0,
+                tdb.DEFAULT, os.O_RDWR)
 
 class CloseTdbTests(TestCase):
+
     def test_double_close(self):
-        self.tdb = tdb.Tdb(tempfile.mkstemp()[1], 0, tdb.DEFAULT, os.O_CREAT|os.O_RDWR)
+        # No hash size in tdb2.
+        if tdb.__version__.startswith("2"):
+            self.tdb = tdb.Tdb(tempfile.mkstemp()[1], tdb.DEFAULT,
+                               os.O_CREAT|os.O_RDWR)
+        else:
+            self.tdb = tdb.Tdb(tempfile.mkstemp()[1], 0, tdb.DEFAULT,
+                               os.O_CREAT|os.O_RDWR)
         self.assertNotEqual(None, self.tdb)
 
         # ensure that double close does not crash python
@@ -25,10 +34,25 @@ class CloseTdbTests(TestCase):
         self.tdb.close()
 
 
+class InternalTdbTests(TestCase):
+
+    def test_repr(self):
+        self.tdb = tdb.Tdb()
+
+        # repr used to crash on internal db
+        self.assertEquals(repr(self.tdb), "Tdb(<internal>)")
+
+
 class SimpleTdbTests(TestCase):
+
     def setUp(self):
         super(SimpleTdbTests, self).setUp()
-        self.tdb = tdb.Tdb(tempfile.mkstemp()[1], 0, tdb.DEFAULT, os.O_CREAT|os.O_RDWR)
+        if tdb.__version__.startswith("2"):
+            self.tdb = tdb.Tdb(tempfile.mkstemp()[1], tdb.DEFAULT,
+                               os.O_CREAT|os.O_RDWR)
+        else:
+            self.tdb = tdb.Tdb(tempfile.mkstemp()[1], 0, tdb.DEFAULT,
+                               os.O_CREAT|os.O_RDWR)
         self.assertNotEqual(None, self.tdb)
 
     def tearDown(self):
@@ -41,7 +65,8 @@ class SimpleTdbTests(TestCase):
         self.tdb.lock_all()
 
     def test_max_dead(self):
-        self.tdb.max_dead = 20
+        if not tdb.__version__.startswith("2"):
+            self.tdb.max_dead = 20
 
     def test_unlockall(self):
         self.tdb.lock_all()
@@ -52,7 +77,8 @@ class SimpleTdbTests(TestCase):
         self.tdb.read_unlock_all()
 
     def test_reopen(self):
-        self.tdb.reopen()
+        if not tdb.__version__.startswith("2"):
+            self.tdb.reopen()
 
     def test_store(self):
         self.tdb.store("bar", "bla")
@@ -60,7 +86,8 @@ class SimpleTdbTests(TestCase):
 
     def test_getitem(self):
         self.tdb["bar"] = "foo"
-        self.tdb.reopen()
+        if not tdb.__version__.startswith("2"):
+            self.tdb.reopen()
         self.assertEquals("foo", self.tdb["bar"])
 
     def test_delete(self):
@@ -76,10 +103,16 @@ class SimpleTdbTests(TestCase):
         self.assertRaises(KeyError, lambda: self.tdb["bla"])
 
     def test_hash_size(self):
-        self.tdb.hash_size
+        if not tdb.__version__.startswith("2"):
+            self.tdb.hash_size
 
     def test_map_size(self):
-        self.tdb.map_size
+        if not tdb.__version__.startswith("2"):
+            self.tdb.map_size
+
+    def test_freelist_size(self):
+        if not tdb.__version__.startswith("2"):
+            self.tdb.freelist_size
 
     def test_name(self):
         self.tdb.filename
@@ -87,7 +120,9 @@ class SimpleTdbTests(TestCase):
     def test_iterator(self):
         self.tdb["bla"] = "1"
         self.tdb["brainslug"] = "2"
-        self.assertEquals(["bla", "brainslug"], list(self.tdb))
+        l = list(self.tdb)
+        l.sort()
+        self.assertEquals(["bla", "brainslug"], l)
 
     def test_transaction_cancel(self):
         self.tdb["bloe"] = "2"
@@ -103,11 +138,13 @@ class SimpleTdbTests(TestCase):
         self.tdb.transaction_commit()
         self.assertEquals("1", self.tdb["bloe"])
 
-    def test_iterator(self):
+    def test_transaction_prepare_commit(self):
         self.tdb["bloe"] = "2"
-        self.tdb["bla"] = "hoi"
-        i = iter(self.tdb)
-        self.assertEquals(set(["bloe", "bla"]), set([i.next(), i.next()]))
+        self.tdb.transaction_start()
+        self.tdb["bloe"] = "1"
+        self.tdb.transaction_prepare_commit()
+        self.tdb.transaction_commit()
+        self.assertEquals("1", self.tdb["bloe"])
 
     def test_iterkeys(self):
         self.tdb["bloe"] = "2"
@@ -122,10 +159,39 @@ class SimpleTdbTests(TestCase):
         self.tdb.clear()
         self.assertEquals(0, len(list(self.tdb)))
 
+    def test_repack(self):
+        if not tdb.__version__.startswith("2"):
+            self.tdb["foo"] = "abc"
+            self.tdb["bar"] = "def"
+            del self.tdb["foo"]
+            self.tdb.repack()
+
+    def test_seqnum(self):
+        if not tdb.__version__.startswith("2"):
+            self.tdb.enable_seqnum()
+            seq1 = self.tdb.seqnum
+            self.tdb.increment_seqnum_nonblock()
+            seq2 = self.tdb.seqnum
+            self.assertEquals(seq2-seq1, 1)
+
     def test_len(self):
         self.assertEquals(0, len(list(self.tdb)))
         self.tdb["entry"] = "value"
         self.assertEquals(1, len(list(self.tdb)))
+
+    def test_add_flags(self):
+        if tdb.__version__.startswith("2"):
+            self.tdb.add_flag(tdb.NOMMAP)
+            self.tdb.remove_flag(tdb.NOMMAP)
+        else:
+            self.tdb.add_flags(tdb.NOMMAP)
+            self.tdb.remove_flags(tdb.NOMMAP)
+
+
+class VersionTests(TestCase):
+
+    def test_present(self):
+        self.assertTrue(isinstance(tdb.__version__, str))
 
 
 if __name__ == '__main__':

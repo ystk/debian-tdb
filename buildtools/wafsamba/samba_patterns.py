@@ -21,11 +21,15 @@ def write_version_header(task):
 
 def SAMBA_MKVERSION(bld, target):
     '''generate the version.h header for Samba'''
-    t = bld.SAMBA_GENERATOR('VERSION', 
+
+    # We only force waf to re-generate this file if we are installing,
+    # because only then is information not included in the deps (the
+    # git revision) included in the version.
+    t = bld.SAMBA_GENERATOR('VERSION',
                             rule=write_version_header,
                             source= 'VERSION',
                             target=target,
-                            always=True)
+                            always=bld.is_install)
     t.env.is_install = bld.is_install
 Build.BuildContext.SAMBA_MKVERSION = SAMBA_MKVERSION
 
@@ -55,6 +59,8 @@ def write_build_options_header(fp):
     fp.write("#include \"includes.h\"\n")
     fp.write("#include \"build_env.h\"\n")
     fp.write("#include \"dynconfig/dynconfig.h\"\n")
+    fp.write("#include \"lib/cluster_support.h\"\n")
+
     fp.write("\n")
     fp.write("static int output(bool screen, const char *format, ...) PRINTF_ATTRIBUTE(2,3);\n")
     fp.write("void build_options(bool screen);\n")
@@ -110,7 +116,6 @@ def write_build_options_header(fp):
     fp.write("       output(screen,\"\\nPaths:\\n\");\n")
     fp.write("       output(screen,\"   SBINDIR: %s\\n\", get_dyn_SBINDIR());\n")
     fp.write("       output(screen,\"   BINDIR: %s\\n\", get_dyn_BINDIR());\n")
-    fp.write("       output(screen,\"   SWATDIR: %s\\n\", get_dyn_SWATDIR());\n")
     fp.write("       output(screen,\"   CONFIGFILE: %s\\n\", get_dyn_CONFIGFILE());\n")
     fp.write("       output(screen,\"   LOGFILEBASE: %s\\n\", get_dyn_LOGFILEBASE());\n")
     fp.write("       output(screen,\"   LMHOSTSFILE: %s\\n\",get_dyn_LMHOSTSFILE());\n")
@@ -126,6 +131,9 @@ def write_build_options_header(fp):
     fp.write("\n")
 
 def write_build_options_footer(fp):
+    fp.write("       /* Output the sizes of the various cluster features */\n")
+    fp.write("       output(screen, \"\\n%s\", cluster_support_features());\n")
+    fp.write("\n")
     fp.write("       /* Output the sizes of the various types */\n")
     fp.write("       output(screen, \"\\nType sizes:\\n\");\n")
     fp.write("       output(screen, \"   sizeof(char):         %lu\\n\",(unsigned long)sizeof(char));\n")

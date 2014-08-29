@@ -13,9 +13,9 @@
 #include "../common/open.c"
 #include "../common/check.c"
 #include "../common/hash.c"
+#include "../common/mutex.c"
 #include "tap-interface.h"
 #include <stdlib.h>
-#include <err.h>
 #include "logging.h"
 
 #undef fcntl
@@ -31,7 +31,7 @@ static bool prepare_entries(struct tdb_context *tdb)
 		key.dsize = sizeof(i);
 		key.dptr = (void *)&i;
 		data.dsize = strlen("world");
-		data.dptr = (void *)"world";
+		data.dptr = discard_const_p(uint8_t, "world");
 
 		if (tdb_store(tdb, key, data, 0) != 0)
 			return false;

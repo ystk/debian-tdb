@@ -31,6 +31,7 @@ import samba_wildcard
 import stale_files
 import symbols
 import pkgconfig
+import configure_file
 
 # some systems have broken threading in python
 if os.environ.get('WAF_NOTHREADS') == '1':
@@ -63,10 +64,10 @@ def SAMBA_BUILD_ENV(conf):
     # this allows all of the bin/shared and bin/python targets
     # to be expressed in terms of build directory paths
     mkdir_p(os.path.join(conf.blddir, 'default'))
-    for p in ['python','shared', 'modules']:
-        link_target = os.path.join(conf.blddir, 'default/' + p)
+    for (source, target) in [('shared', 'shared'), ('modules', 'modules'), ('python', 'python_modules')]:
+        link_target = os.path.join(conf.blddir, 'default/' + target)
         if not os.path.lexists(link_target):
-            os.symlink('../' + p, link_target)
+            os.symlink('../' + source, link_target)
 
     # get perl to put the blib files in the build directory
     blib_bld = os.path.join(conf.blddir, 'default/pidl/blib')
@@ -109,7 +110,7 @@ def SAMBA_LIBRARY(bld, libname, source,
                   realname=None,
                   autoproto=None,
                   autoproto_extra_source='',
-                  group='libraries',
+                  group='main',
                   depends_on='',
                   local_include=True,
                   global_include=True,
@@ -129,8 +130,12 @@ def SAMBA_LIBRARY(bld, libname, source,
                   private_library=False,
                   grouping_library=False,
                   allow_undefined_symbols=False,
+                  allow_warnings=True,
                   enabled=True):
     '''define a Samba library'''
+
+    if LIB_MUST_BE_PRIVATE(bld, libname):
+        private_library=True
 
     if not enabled:
         SET_TARGET_TYPE(bld, libname, 'DISABLED')
@@ -172,6 +177,7 @@ def SAMBA_LIBRARY(bld, libname, source,
                         autoproto_extra_source=autoproto_extra_source,
                         depends_on     = depends_on,
                         hide_symbols   = hide_symbols,
+                        allow_warnings = allow_warnings,
                         pyembed        = pyembed,
                         pyext          = pyext,
                         local_include  = local_include,
@@ -281,9 +287,9 @@ def SAMBA_LIBRARY(bld, libname, source,
     if pc_files is not None and not private_library:
         bld.PKG_CONFIG_FILES(pc_files, vnum=vnum)
 
-    if (manpages is not None and 'XSLTPROC_MANPAGES' in bld.env and 
+    if (manpages is not None and 'XSLTPROC_MANPAGES' in bld.env and
         bld.env['XSLTPROC_MANPAGES']):
-        bld.MANPAGES(manpages)
+        bld.MANPAGES(manpages, install)
 
 
 Build.BuildContext.SAMBA_LIBRARY = SAMBA_LIBRARY
@@ -302,7 +308,7 @@ def SAMBA_BINARY(bld, binname, source,
                  use_hostcc=False,
                  use_global_deps=True,
                  compiler=None,
-                 group='binaries',
+                 group='main',
                  manpages=None,
                  local_include=True,
                  global_include=True,
@@ -338,6 +344,15 @@ def SAMBA_BINARY(bld, binname, source,
     else:
         subsystem_group = group
 
+    # only specify PIE flags for binaries
+    pie_cflags = cflags
+    pie_ldflags = TO_LIST(ldflags)
+    if bld.env['ENABLE_PIE'] == True:
+        pie_cflags += ' -fPIE'
+        pie_ldflags.extend(TO_LIST('-pie'))
+    if bld.env['ENABLE_RELRO'] == True:
+        pie_ldflags.extend(TO_LIST('-Wl,-z,relro,-z,now'))
+
     # first create a target for building the object files for this binary
     # by separating in this way, we avoid recompiling the C files
     # separately for the install binary and the build binary
@@ -345,7 +360,7 @@ def SAMBA_BINARY(bld, binname, source,
                         source         = source,
                         deps           = deps,
                         includes       = includes,
-                        cflags         = cflags,
+                        cflags         = pie_cflags,
                         group          = subsystem_group,
                         autoproto      = autoproto,
                         subsystem_name = subsystem_name,
@@ -375,11 +390,11 @@ def SAMBA_BINARY(bld, binname, source,
         install_path   = None,
         samba_inst_path= install_path,
         samba_install  = install,
-        samba_ldflags  = TO_LIST(ldflags)
+        samba_ldflags  = pie_ldflags
         )
 
     if manpages is not None and 'XSLTPROC_MANPAGES' in bld.env and bld.env['XSLTPROC_MANPAGES']:
-        bld.MANPAGES(manpages)
+        bld.MANPAGES(manpages, install)
 
 Build.BuildContext.SAMBA_BINARY = SAMBA_BINARY
 
@@ -401,7 +416,9 @@ def SAMBA_MODULE(bld, modname, source,
                  subdir=None,
                  enabled=True,
                  pyembed=False,
-                 allow_undefined_symbols=False
+                 manpages=None,
+                 allow_undefined_symbols=False,
+                 allow_warnings=True
                  ):
     '''define a Samba module.'''
 
@@ -410,6 +427,9 @@ def SAMBA_MODULE(bld, modname, source,
         source = bld.SUBDIR(subdir, source)
 
     if internal_module or BUILTIN_LIBRARY(bld, modname):
+        # Do not create modules for disabled subsystems
+        if subsystem and GET_TARGET_TYPE(bld, subsystem) == 'DISABLED':
+            return
         bld.SAMBA_SUBSYSTEM(modname, source,
                     deps=deps,
                     includes=includes,
@@ -418,6 +438,7 @@ def SAMBA_MODULE(bld, modname, source,
                     cflags=cflags,
                     local_include=local_include,
                     global_include=global_include,
+                    allow_warnings=allow_warnings,
                     enabled=enabled)
 
         bld.ADD_INIT_FUNCTION(subsystem, modname, init_function)
@@ -425,6 +446,10 @@ def SAMBA_MODULE(bld, modname, source,
 
     if not enabled:
         SET_TARGET_TYPE(bld, modname, 'DISABLED')
+        return
+
+    # Do not create modules for disabled subsystems
+    if subsystem and GET_TARGET_TYPE(bld, subsystem) == 'DISABLED':
         return
 
     obj_target = modname + '.objlist'
@@ -459,7 +484,9 @@ def SAMBA_MODULE(bld, modname, source,
                       link_name=build_link_name,
                       install_path="${MODULESDIR}/%s" % subsystem,
                       pyembed=pyembed,
-                      allow_undefined_symbols=allow_undefined_symbols
+                      manpages=manpages,
+                      allow_undefined_symbols=allow_undefined_symbols,
+                      allow_warnings=allow_warnings
                       )
 
 
@@ -477,7 +504,7 @@ def SAMBA_SUBSYSTEM(bld, modname, source,
                     cflags='',
                     cflags_end=None,
                     group='main',
-                    init_function_sentinal=None,
+                    init_function_sentinel=None,
                     autoproto=None,
                     autoproto_extra_source='',
                     depends_on='',
@@ -491,6 +518,7 @@ def SAMBA_SUBSYSTEM(bld, modname, source,
                     vars=None,
                     subdir=None,
                     hide_symbols=False,
+                    allow_warnings=True,
                     pyext=False,
                     pyembed=False):
     '''define a Samba subsystem'''
@@ -526,7 +554,9 @@ def SAMBA_SUBSYSTEM(bld, modname, source,
         features       = features,
         source         = source,
         target         = modname,
-        samba_cflags   = CURRENT_CFLAGS(bld, modname, cflags, hide_symbols=hide_symbols),
+        samba_cflags   = CURRENT_CFLAGS(bld, modname, cflags,
+                                        allow_warnings=allow_warnings,
+                                        hide_symbols=hide_symbols),
         depends_on     = depends_on,
         samba_deps     = TO_LIST(deps),
         samba_includes = includes,
@@ -567,6 +597,12 @@ def SAMBA_GENERATOR(bld, name, rule, source='', target='',
     if not enabled:
         return
 
+    dep_vars = []
+    if isinstance(vars, dict):
+        dep_vars = vars.keys()
+    elif isinstance(vars, list):
+        dep_vars = vars
+
     bld.SET_BUILD_GROUP(group)
     t = bld(
         rule=rule,
@@ -577,7 +613,7 @@ def SAMBA_GENERATOR(bld, name, rule, source='', target='',
         before='cc',
         ext_out='.c',
         samba_type='GENERATOR',
-        dep_vars = [rule] + (vars or []),
+        dep_vars = [rule] + dep_vars,
         name=name)
 
     if always:
@@ -610,8 +646,6 @@ def SETUP_BUILD_GROUPS(bld):
     bld.add_group('headers')
     bld.add_group('main')
     bld.add_group('symbolcheck')
-    bld.add_group('libraries')
-    bld.add_group('binaries')
     bld.add_group('syslibcheck')
     bld.add_group('final')
 Build.BuildContext.SETUP_BUILD_GROUPS = SETUP_BUILD_GROUPS
@@ -651,7 +685,7 @@ def SAMBA_SCRIPT(bld, name, pattern, installdir, installname=None):
     bld.SET_BUILD_GROUP('build_source')
     for s in TO_LIST(source):
         iname = s
-        if installname != None:
+        if installname is not None:
             iname = installname
         target = os.path.join(installdir, iname)
         tgtdir = os.path.dirname(os.path.join(bld.srcnode.abspath(bld.env), '..', target))
@@ -677,14 +711,25 @@ def copy_and_fix_python_path(task):
         replacement="""sys.path.insert(0, "%s")
 sys.path.insert(1, "%s")""" % (task.env["PYTHONARCHDIR"], task.env["PYTHONDIR"])
 
+    shebang = None
+
+    if task.env["PYTHON"][0] == "/":
+        replacement_shebang = "#!%s\n" % task.env["PYTHON"]
+    else:
+        replacement_shebang = "#!/usr/bin/env %s\n" % task.env["PYTHON"]
+
     installed_location=task.outputs[0].bldpath(task.env)
     source_file = open(task.inputs[0].srcpath(task.env))
     installed_file = open(installed_location, 'w')
+    lineno = 0
     for line in source_file:
         newline = line
-        if pattern in line:
+        if lineno == 0 and task.env["PYTHON_SPECIFIED"] == True and line[:2] == "#!":
+            newline = replacement_shebang
+        elif pattern in line:
             newline = line.replace(pattern, replacement)
         installed_file.write(newline)
+        lineno = lineno + 1
     installed_file.close()
     os.chmod(installed_location, 0755)
     return 0
@@ -708,6 +753,8 @@ def install_file(bld, destdir, file, chmod=MODE_644, flat=False,
                             target=inst_file)
         bld.add_manual_dependency(bld.path.find_or_declare(inst_file), bld.env["PYTHONARCHDIR"])
         bld.add_manual_dependency(bld.path.find_or_declare(inst_file), bld.env["PYTHONDIR"])
+        bld.add_manual_dependency(bld.path.find_or_declare(inst_file), str(bld.env["PYTHON_SPECIFIED"]))
+        bld.add_manual_dependency(bld.path.find_or_declare(inst_file), bld.env["PYTHON"])
         file = inst_file
     if base_name:
         file = os.path.join(base_name, file)
@@ -752,7 +799,7 @@ def INSTALL_DIRS(bld, destdir, dirs):
 Build.BuildContext.INSTALL_DIRS = INSTALL_DIRS
 
 
-def MANPAGES(bld, manpages):
+def MANPAGES(bld, manpages, install):
     '''build and install manual pages'''
     bld.env.MAN_XSL = 'http://docbook.sourceforge.net/release/xsl/current/manpages/docbook.xsl'
     for m in manpages.split():
@@ -761,11 +808,33 @@ def MANPAGES(bld, manpages):
                             source=source,
                             target=m,
                             group='final',
-                            rule='${XSLTPROC} -o ${TGT} --nonet ${MAN_XSL} ${SRC}'
+                            rule='${XSLTPROC} --xinclude -o ${TGT} --nonet ${MAN_XSL} ${SRC}'
                             )
-        bld.INSTALL_FILES('${MANDIR}/man%s' % m[-1], m, flat=True)
+        if install:
+            bld.INSTALL_FILES('${MANDIR}/man%s' % m[-1], m, flat=True)
 Build.BuildContext.MANPAGES = MANPAGES
 
+def SAMBAMANPAGES(bld, manpages, extra_source=None):
+    '''build and install manual pages'''
+    bld.env.SAMBA_EXPAND_XSL = bld.srcnode.abspath() + '/docs-xml/xslt/expand-sambadoc.xsl'
+    bld.env.SAMBA_MAN_XSL = bld.srcnode.abspath() + '/docs-xml/xslt/man.xsl'
+    bld.env.SAMBA_CATALOGS = 'file:///etc/xml/catalog file:///usr/local/share/xml/catalog file://' + bld.srcnode.abspath() + '/bin/default/docs-xml/build/catalog.xml'
+
+    for m in manpages.split():
+        source = m + '.xml'
+        if extra_source is not None:
+            source = [source, extra_source]
+        bld.SAMBA_GENERATOR(m,
+                            source=source,
+                            target=m,
+                            group='final',
+                            rule='''XML_CATALOG_FILES="${SAMBA_CATALOGS}"
+                                    export XML_CATALOG_FILES
+                                    ${XSLTPROC} --xinclude --stringparam noreference 0 -o ${TGT}.xml --nonet ${SAMBA_EXPAND_XSL} ${SRC[0].abspath(env)}
+                                    ${XSLTPROC} --nonet -o ${TGT} ${SAMBA_MAN_XSL} ${TGT}.xml'''
+                            )
+        bld.INSTALL_FILES('${MANDIR}/man%s' % m[-1], m, flat=True)
+Build.BuildContext.SAMBAMANPAGES = SAMBAMANPAGES
 
 #############################################################
 # give a nicer display when building different types of files

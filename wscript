@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 APPNAME = 'tdb'
-VERSION = '1.2.10'
+VERSION = '1.3.0'
 
 blddir = 'bin'
 
@@ -17,10 +17,47 @@ import wafsamba, samba_dist, Options, Logs
 
 samba_dist.DIST_DIRS('lib/tdb:. lib/replace:lib/replace buildtools:buildtools')
 
+tdb1_unit_tests = [
+    'run-3G-file',
+    'run-bad-tdb-header',
+    'run',
+    'run-check',
+    'run-corrupt',
+    'run-die-during-transaction',
+    'run-endian',
+    'run-incompatible',
+    'run-nested-transactions',
+    'run-nested-traverse',
+    'run-no-lock-during-traverse',
+    'run-oldhash',
+    'run-open-during-transaction',
+    'run-readonly-check',
+    'run-rescue',
+    'run-rescue-find_entry',
+    'run-rwlock-check',
+    'run-summary',
+    'run-transaction-expand',
+    'run-traverse-in-transaction',
+    'run-wronghash-fail',
+    'run-zero-append',
+    'run-marklock-deadlock',
+    'run-mutex-openflags2',
+    'run-mutex-trylock',
+    'run-mutex-allrecord-bench',
+    'run-mutex-allrecord-trylock',
+    'run-mutex-allrecord-block',
+    'run-mutex-die',
+    'run-mutex1',
+]
+
 def set_options(opt):
     opt.BUILTIN_DEFAULT('replace')
     opt.PRIVATE_EXTENSION_DEFAULT('tdb', noextension='tdb')
     opt.RECURSE('lib/replace')
+    opt.add_option('--disable-tdb-mutex-locking',
+                   help=("Disable the use of pthread robust mutexes"),
+                   action="store_true", dest='disable_tdb_mutex_locking',
+                   default=False)
     if opt.IN_LAUNCH_DIR():
         opt.add_option('--disable-python',
                        help=("disable the pytdb module"),
@@ -28,6 +65,11 @@ def set_options(opt):
 
 
 def configure(conf):
+    conf.env.disable_tdb_mutex_locking = getattr(Options.options,
+                                                 'disable_tdb_mutex_locking',
+                                                 False)
+    if not conf.env.disable_tdb_mutex_locking:
+        conf.env.replace_add_global_pthread = True
     conf.RECURSE('lib/replace')
 
     conf.env.standalone_tdb = conf.IN_LAUNCH_DIR()
@@ -42,6 +84,11 @@ def configure(conf):
                 conf.define('USING_SYSTEM_PYTDB', 1)
 
     conf.env.disable_python = getattr(Options.options, 'disable_python', False)
+
+    if (conf.CONFIG_SET('HAVE_ROBUST_MUTEXES') and
+        conf.env.building_tdb and
+        not conf.env.disable_tdb_mutex_locking):
+        conf.define('USE_TDB_MUTEX_LOCKING', 1)
 
     conf.CHECK_XSLTPROC_MANPAGES()
 
@@ -62,10 +109,12 @@ def configure(conf):
 def build(bld):
     bld.RECURSE('lib/replace')
 
-    COMMON_SRC = bld.SUBDIR('common',
-                            '''check.c error.c tdb.c traverse.c
-                            freelistcheck.c lock.c dump.c freelist.c
-                            io.c open.c transaction.c hash.c summary.c''')
+    COMMON_FILES='''check.c error.c tdb.c traverse.c
+                    freelistcheck.c lock.c dump.c freelist.c
+                    io.c open.c transaction.c hash.c summary.c rescue.c
+                    mutex.c'''
+
+    COMMON_SRC = bld.SUBDIR('common', COMMON_FILES)
 
     if bld.env.standalone_tdb:
         bld.env.PKGCONFIGDIR = '${LIBDIR}/pkgconfig'
@@ -74,9 +123,15 @@ def build(bld):
         private_library = True
 
     if not bld.CONFIG_SET('USING_SYSTEM_TDB'):
+
+        tdb_deps = 'replace'
+
+        if bld.CONFIG_SET('USE_TDB_MUTEX_LOCKING'):
+            tdb_deps += ' pthread'
+
         bld.SAMBA_LIBRARY('tdb',
                           COMMON_SRC,
-                          deps='replace',
+                          deps=tdb_deps,
                           includes='include',
                           abi_directory='ABI',
                           abi_match='tdb_*',
@@ -94,67 +149,32 @@ def build(bld):
 
         bld.SAMBA_BINARY('tdbrestore',
                          'tools/tdbrestore.c',
-                         'tdb', manpages='manpages/tdbrestore.8')
+                         'tdb', manpages='man/tdbrestore.8')
 
         bld.SAMBA_BINARY('tdbdump',
                          'tools/tdbdump.c',
-                         'tdb', manpages='manpages/tdbdump.8')
+                         'tdb', manpages='man/tdbdump.8')
 
         bld.SAMBA_BINARY('tdbbackup',
                          'tools/tdbbackup.c',
                          'tdb',
-                         manpages='manpages/tdbbackup.8')
+                         manpages='man/tdbbackup.8')
 
         bld.SAMBA_BINARY('tdbtool',
                          'tools/tdbtool.c',
-                         'tdb', manpages='manpages/tdbtool.8')
+                         'tdb', manpages='man/tdbtool.8')
 
         # FIXME: This hardcoded list is stupid, stupid, stupid.
         bld.SAMBA_SUBSYSTEM('tdb-test-helpers',
                             'test/external-agent.c test/lock-tracking.c test/logging.c',
-                            'replace',
+                            tdb_deps,
                             includes='include')
 
-        bld.SAMBA_BINARY('tdb1-run-3G-file', 'test/run-3G-file.c',
-                         'replace tdb-test-helpers', includes='include', install=False)
-        bld.SAMBA_BINARY('tdb1-run-bad-tdb-header', 'test/run-bad-tdb-header.c',
-                         'replace tdb-test-helpers', includes='include', install=False)
-        bld.SAMBA_BINARY('tdb1-run', 'test/run.c',
-                         'replace tdb-test-helpers', includes='include', install=False)
-        bld.SAMBA_BINARY('tdb1-run-check', 'test/run-check.c',
-                         'replace tdb-test-helpers', includes='include', install=False)
-        bld.SAMBA_BINARY('tdb1-run-corrupt', 'test/run-corrupt.c',
-                         'replace tdb-test-helpers', includes='include', install=False)
-        bld.SAMBA_BINARY('tdb1-run-die-during-transaction', 'test/run-die-during-transaction.c',
-                         'replace tdb-test-helpers', includes='include', install=False)
-        bld.SAMBA_BINARY('tdb1-run-endian', 'test/run-endian.c',
-                         'replace tdb-test-helpers', includes='include', install=False)
-        bld.SAMBA_BINARY('tdb1-run-incompatible', 'test/run-incompatible.c',
-                         'replace tdb-test-helpers', includes='include', install=False)
-        bld.SAMBA_BINARY('tdb1-run-nested-transactions', 'test/run-nested-transactions.c',
-                         'replace tdb-test-helpers', includes='include', install=False)
-        bld.SAMBA_BINARY('tdb1-run-nested-traverse', 'test/run-nested-traverse.c',
-                         'replace tdb-test-helpers', includes='include', install=False)
-        bld.SAMBA_BINARY('tdb1-run-no-lock-during-traverse', 'test/run-no-lock-during-traverse.c',
-                         'replace tdb-test-helpers', includes='include', install=False)
-        bld.SAMBA_BINARY('tdb1-run-oldhash', 'test/run-oldhash.c',
-                         'replace tdb-test-helpers', includes='include', install=False)
-        bld.SAMBA_BINARY('tdb1-run-open-during-transaction', 'test/run-open-during-transaction.c',
-                         'replace tdb-test-helpers', includes='include', install=False)
-        bld.SAMBA_BINARY('tdb1-run-readonly-check', 'test/run-readonly-check.c',
-                         'replace tdb-test-helpers', includes='include', install=False)
-        bld.SAMBA_BINARY('tdb1-run-rwlock-check', 'test/run-rwlock-check.c',
-                         'replace tdb-test-helpers', includes='include', install=False)
-        bld.SAMBA_BINARY('tdb1-run-summary', 'test/run-summary.c',
-                         'replace tdb-test-helpers', includes='include', install=False)
-        bld.SAMBA_BINARY('tdb1-run-transaction-expand', 'test/run-transaction-expand.c',
-                         'replace tdb-test-helpers', includes='include', install=False)
-        bld.SAMBA_BINARY('tdb1-run-traverse-in-transaction', 'test/run-traverse-in-transaction.c',
-                         'replace tdb-test-helpers', includes='include', install=False)
-        bld.SAMBA_BINARY('tdb1-run-wronghash-fail', 'test/run-wronghash-fail.c',
-                         'replace tdb-test-helpers', includes='include', install=False)
-        bld.SAMBA_BINARY('tdb1-run-zero-append', 'test/run-zero-append.c',
-                         'replace tdb-test-helpers', includes='include', install=False)
+        for t in tdb1_unit_tests:
+            b = "tdb1-" + t
+            s = "test/" + t + ".c"
+            bld.SAMBA_BINARY(b, s, 'replace tdb-test-helpers',
+                             includes='include', install=False)
 
     if not bld.CONFIG_SET('USING_SYSTEM_PYTDB'):
         bld.SAMBA_PYTHON('pytdb',
@@ -167,7 +187,7 @@ def build(bld):
 def testonly(ctx):
     '''run tdb testsuite'''
     import Utils, samba_utils, shutil
-    ecode = 0;
+    ecode = 0
 
     test_prefix = "%s/st" % (Utils.g_module.blddir)
     shutil.rmtree(test_prefix, ignore_errors=True)
@@ -185,22 +205,23 @@ def testonly(ctx):
         if not os.path.exists(link):
             os.symlink(os.path.abspath(os.path.join(env.cwd, 'test')), link)
 
-        for f in 'tdb1-run-3G-file', 'tdb1-run-bad-tdb-header', 'tdb1-run', 'tdb1-run-check', 'tdb1-run-corrupt', 'tdb1-run-die-during-transaction', 'tdb1-run-endian', 'tdb1-run-incompatible', 'tdb1-run-nested-transactions', 'tdb1-run-nested-traverse', 'tdb1-run-no-lock-during-traverse', 'tdb1-run-oldhash', 'tdb1-run-open-during-transaction', 'tdb1-run-readonly-check', 'tdb1-run-rwlock-check', 'tdb1-run-summary', 'tdb1-run-transaction-expand', 'tdb1-run-traverse-in-transaction', 'tdb1-run-wronghash-fail', 'tdb1-run-zero-append':
+        for t in tdb1_unit_tests:
+            f = "tdb1-" + t
             cmd = "cd " + testdir + " && " + os.path.abspath(os.path.join(Utils.g_module.blddir, f)) + " > test-output 2>&1"
             print("..." + f)
             ret = samba_utils.RUN_COMMAND(cmd)
             if ret != 0:
                 print("%s failed:" % f)
                 samba_utils.RUN_COMMAND("cat " + os.path.join(testdir, 'test-output'))
-                ecode = ret;
-                break;
+                ecode = ret
+                break
 
     if ecode == 0:
         cmd = os.path.join(Utils.g_module.blddir, 'tdbtorture')
         ret = samba_utils.RUN_COMMAND(cmd)
         print("testsuite returned %d" % ret)
         if ret != 0:
-            ecode = ret;
+            ecode = ret
     sys.exit(ecode)
 
 # WAF doesn't build the unit tests for this, maybe because they don't link with tdb?

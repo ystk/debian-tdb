@@ -1,4 +1,4 @@
- /* 
+ /*
    Unix SMB/CIFS implementation.
 
    trivial database library
@@ -28,7 +28,7 @@
 #include "tdb_private.h"
 
 /* 'right' merges can involve O(n^2) cost when combined with a
-   traverse, so they are disabled until we find a way to do them in 
+   traverse, so they are disabled until we find a way to do them in
    O(1) time
 */
 #define USE_RIGHT_MERGES 0
@@ -42,17 +42,17 @@ int tdb_rec_free_read(struct tdb_context *tdb, tdb_off_t off, struct tdb_record 
 	if (rec->magic == TDB_MAGIC) {
 		/* this happens when a app is showdown while deleting a record - we should
 		   not completely fail when this happens */
-		TDB_LOG((tdb, TDB_DEBUG_WARNING, "tdb_rec_free_read non-free magic 0x%x at offset=%d - fixing\n", 
+		TDB_LOG((tdb, TDB_DEBUG_WARNING, "tdb_rec_free_read non-free magic 0x%x at offset=%u - fixing\n",
 			 rec->magic, off));
 		rec->magic = TDB_FREE_MAGIC;
-		if (tdb->methods->tdb_write(tdb, off, rec, sizeof(*rec)) == -1)
+		if (tdb_rec_write(tdb, off, rec) == -1)
 			return -1;
 	}
 
 	if (rec->magic != TDB_FREE_MAGIC) {
 		/* Ensure ecode is set for log fn. */
 		tdb->ecode = TDB_ERR_CORRUPT;
-		TDB_LOG((tdb, TDB_DEBUG_WARNING, "tdb_rec_free_read bad magic 0x%x at offset=%d\n", 
+		TDB_LOG((tdb, TDB_DEBUG_WARNING, "tdb_rec_free_read bad magic 0x%x at offset=%u\n",
 			   rec->magic, off));
 		return -1;
 	}
@@ -79,7 +79,7 @@ static int remove_from_freelist(struct tdb_context *tdb, tdb_off_t off, tdb_off_
 		last_ptr = i;
 	}
 	tdb->ecode = TDB_ERR_CORRUPT;
-	TDB_LOG((tdb, TDB_DEBUG_FATAL,"remove_from_freelist: not on list at off=%d\n", off));
+	TDB_LOG((tdb, TDB_DEBUG_FATAL,"remove_from_freelist: not on list at off=%u\n", off));
 	return -1;
 }
 #endif
@@ -139,7 +139,7 @@ left:
 #endif
 
 	/* Look left */
-	if (offset - sizeof(tdb_off_t) > TDB_DATA_START(tdb->header.hash_size)) {
+	if (offset - sizeof(tdb_off_t) > TDB_DATA_START(tdb->hash_size)) {
 		tdb_off_t left = offset - sizeof(tdb_off_t);
 		struct tdb_record l;
 		tdb_off_t leftsize;
@@ -158,7 +158,7 @@ left:
 		left = offset - leftsize;
 
 		if (leftsize > offset ||
-		    left < TDB_DATA_START(tdb->header.hash_size)) {
+		    left < TDB_DATA_START(tdb->hash_size)) {
 			goto update;
 		}
 
@@ -170,7 +170,7 @@ left:
 
 		/* If it's free, expand to include it. */
 		if (l.magic == TDB_FREE_MAGIC) {
-			/* we now merge the new record into the left record, rather than the other 
+			/* we now merge the new record into the left record, rather than the other
 			   way around. This makes the operation O(1) instead of O(n). This change
 			   prevents traverse from being O(n^2) after a lot of deletes */
 			l.rec_len += sizeof(*rec) + rec->rec_len;
@@ -195,7 +195,7 @@ update:
 	if (tdb_ofs_read(tdb, FREELIST_TOP, &rec->next) == -1 ||
 	    tdb_rec_write(tdb, offset, rec) == -1 ||
 	    tdb_ofs_write(tdb, FREELIST_TOP, &offset) == -1) {
-		TDB_LOG((tdb, TDB_DEBUG_FATAL, "tdb_free record write failed at offset=%d\n", offset));
+		TDB_LOG((tdb, TDB_DEBUG_FATAL, "tdb_free record write failed at offset=%u\n", offset));
 		goto fail;
 	}
 
@@ -210,7 +210,7 @@ update:
 
 
 
-/* 
+/*
    the core of tdb_allocate - called when we have decided which
    free list entry to use
 
@@ -218,7 +218,7 @@ update:
    not the beginning. This is so the left merge in a free is more likely to be
    able to free up the record without fragmentation
  */
-static tdb_off_t tdb_allocate_ofs(struct tdb_context *tdb, 
+static tdb_off_t tdb_allocate_ofs(struct tdb_context *tdb,
 				  tdb_len_t length, tdb_off_t rec_ptr,
 				  struct tdb_record *rec, tdb_off_t last_ptr)
 {
@@ -250,7 +250,7 @@ static tdb_off_t tdb_allocate_ofs(struct tdb_context *tdb,
 	}
 
 	/* and setup the new record */
-	rec_ptr += sizeof(*rec) + rec->rec_len;	
+	rec_ptr += sizeof(*rec) + rec->rec_len;
 
 	memset(rec, '\0', sizeof(*rec));
 	rec->rec_len = length;
@@ -273,7 +273,8 @@ static tdb_off_t tdb_allocate_ofs(struct tdb_context *tdb,
 
    0 is returned if the space could not be allocated
  */
-tdb_off_t tdb_allocate(struct tdb_context *tdb, tdb_len_t length, struct tdb_record *rec)
+static tdb_off_t tdb_allocate_from_freelist(
+	struct tdb_context *tdb, tdb_len_t length, struct tdb_record *rec)
 {
 	tdb_off_t rec_ptr, last_ptr, newrec_ptr;
 	struct {
@@ -281,9 +282,6 @@ tdb_off_t tdb_allocate(struct tdb_context *tdb, tdb_len_t length, struct tdb_rec
 		tdb_len_t rec_len;
 	} bestfit;
 	float multiplier = 1.0;
-
-	if (tdb_lock(tdb, -1, F_WRLCK) == -1)
-		return 0;
 
 	/* over-allocate to reduce fragmentation */
 	length *= 1.25;
@@ -297,20 +295,20 @@ tdb_off_t tdb_allocate(struct tdb_context *tdb, tdb_len_t length, struct tdb_rec
 
 	/* read in the freelist top */
 	if (tdb_ofs_read(tdb, FREELIST_TOP, &rec_ptr) == -1)
-		goto fail;
+		return 0;
 
 	bestfit.rec_ptr = 0;
 	bestfit.last_ptr = 0;
 	bestfit.rec_len = 0;
 
-	/* 
+	/*
 	   this is a best fit allocation strategy. Originally we used
 	   a first fit strategy, but it suffered from massive fragmentation
 	   issues when faced with a slowly increasing record size.
 	 */
 	while (rec_ptr) {
 		if (tdb_rec_free_read(tdb, rec_ptr, rec) == -1) {
-			goto fail;
+			return 0;
 		}
 
 		if (rec->rec_len >= length) {
@@ -344,12 +342,11 @@ tdb_off_t tdb_allocate(struct tdb_context *tdb, tdb_len_t length, struct tdb_rec
 
 	if (bestfit.rec_ptr != 0) {
 		if (tdb_rec_free_read(tdb, bestfit.rec_ptr, rec) == -1) {
-			goto fail;
+			return 0;
 		}
 
-		newrec_ptr = tdb_allocate_ofs(tdb, length, bestfit.rec_ptr, 
+		newrec_ptr = tdb_allocate_ofs(tdb, length, bestfit.rec_ptr,
 					      rec, bestfit.last_ptr);
-		tdb_unlock(tdb, -1, F_WRLCK);
 		return newrec_ptr;
 	}
 
@@ -357,15 +354,98 @@ tdb_off_t tdb_allocate(struct tdb_context *tdb, tdb_len_t length, struct tdb_rec
 	   database and if we can then try again */
 	if (tdb_expand(tdb, length + sizeof(*rec)) == 0)
 		goto again;
- fail:
-	tdb_unlock(tdb, -1, F_WRLCK);
+
 	return 0;
 }
 
+static bool tdb_alloc_dead(
+	struct tdb_context *tdb, int hash, tdb_len_t length,
+	tdb_off_t *rec_ptr, struct tdb_record *rec)
+{
+	tdb_off_t last_ptr;
 
+	*rec_ptr = tdb_find_dead(tdb, hash, rec, length, &last_ptr);
+	if (*rec_ptr == 0) {
+		return false;
+	}
+	/*
+	 * Unlink the record from the hash chain, it's about to be moved into
+	 * another one.
+	 */
+	return (tdb_ofs_write(tdb, last_ptr, &rec->next) == 0);
+}
 
-/* 
-   return the size of the freelist - used to decide if we should repack 
+/*
+ * Chain "hash" is assumed to be locked
+ */
+
+tdb_off_t tdb_allocate(struct tdb_context *tdb, int hash, tdb_len_t length,
+		       struct tdb_record *rec)
+{
+	tdb_off_t ret;
+	int i;
+
+	if (tdb->max_dead_records == 0) {
+		/*
+		 * No dead records to expect anywhere. Do the blocking
+		 * freelist lock without trying to steal from others
+		 */
+		goto blocking_freelist_allocate;
+	}
+
+	/*
+	 * The following loop tries to get the freelist lock nonblocking. If
+	 * it gets the lock, allocate from there. If the freelist is busy,
+	 * instead of waiting we try to steal dead records from other hash
+	 * chains.
+	 *
+	 * Be aware that we do nonblocking locks on the other hash chains as
+	 * well and fail gracefully. This way we avoid deadlocks (we block two
+	 * hash chains, something which is pretty bad normally)
+	 */
+
+	for (i=0; i<tdb->hash_size; i++) {
+
+		int list;
+
+		list = BUCKET(hash+i);
+
+		if (tdb_lock_nonblock(tdb, list, F_WRLCK) == 0) {
+			bool got_dead;
+
+			got_dead = tdb_alloc_dead(tdb, list, length, &ret, rec);
+			tdb_unlock(tdb, list, F_WRLCK);
+
+			if (got_dead) {
+				return ret;
+			}
+		}
+
+		if (tdb_lock_nonblock(tdb, -1, F_WRLCK) == 0) {
+			/*
+			 * Under the freelist lock take the chance to give
+			 * back our dead records.
+			 */
+			tdb_purge_dead(tdb, hash);
+
+			ret = tdb_allocate_from_freelist(tdb, length, rec);
+			tdb_unlock(tdb, -1, F_WRLCK);
+			return ret;
+		}
+	}
+
+blocking_freelist_allocate:
+
+	if (tdb_lock(tdb, -1, F_WRLCK) == -1) {
+		return 0;
+	}
+	ret = tdb_allocate_from_freelist(tdb, length, rec);
+	tdb_unlock(tdb, -1, F_WRLCK);
+	return ret;
+}
+
+/*
+   return the size of the freelist - used to decide if we should repack
 */
 _PUBLIC_ int tdb_freelist_size(struct tdb_context *tdb)
 {

@@ -1,4 +1,4 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
    low level tdb backup and restore utility
    Copyright (C) Andrew Tridgell              2002
@@ -7,12 +7,12 @@
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
@@ -61,7 +61,7 @@ static void tdb_log(struct tdb_context *tdb, enum tdb_debug_level level, const c
 static void tdb_log(struct tdb_context *tdb, enum tdb_debug_level level, const char *format, ...)
 {
 	va_list ap;
-    
+
 	va_start(ap, format);
 	vfprintf(stdout, format, ap);
 	va_end(ap);
@@ -104,7 +104,8 @@ static int test_fn(TDB_CONTEXT *tdb, TDB_DATA key, TDB_DATA dbuf, void *state)
   only doing the backup if its OK
   this function is also used for restore
 */
-static int backup_tdb(const char *old_name, const char *new_name, int hash_size)
+static int backup_tdb(const char *old_name, const char *new_name,
+		      int hash_size, int nolock)
 {
 	TDB_CONTEXT *tdb;
 	TDB_CONTEXT *tdb_new;
@@ -122,7 +123,8 @@ static int backup_tdb(const char *old_name, const char *new_name, int hash_size)
 	}
 
 	/* open the old tdb */
-	tdb = tdb_open_ex(old_name, 0, 0, 
+	tdb = tdb_open_ex(old_name, 0,
+			  TDB_DEFAULT | (nolock ? TDB_NOLOCK : 0),
 			  O_RDWR, 0, &log_ctx, NULL);
 	if (!tdb) {
 		printf("Failed to open %s\n", old_name);
@@ -132,10 +134,10 @@ static int backup_tdb(const char *old_name, const char *new_name, int hash_size)
 
 	/* create the new tdb */
 	unlink(tmp_name);
-	tdb_new = tdb_open_ex(tmp_name, 
-			      hash_size ? hash_size : tdb_hash_size(tdb), 
-			      TDB_DEFAULT, 
-			      O_RDWR|O_CREAT|O_EXCL, st.st_mode & 0777, 
+	tdb_new = tdb_open_ex(tmp_name,
+			      hash_size ? hash_size : tdb_hash_size(tdb),
+			      TDB_DEFAULT,
+			      O_RDWR|O_CREAT|O_EXCL, st.st_mode & 0777,
 			      &log_ctx, NULL);
 	if (!tdb_new) {
 		perror(tmp_name);
@@ -192,9 +194,9 @@ static int backup_tdb(const char *old_name, const char *new_name, int hash_size)
 
 	/* close the new tdb and re-open read-only */
 	tdb_close(tdb_new);
-	tdb_new = tdb_open_ex(tmp_name, 
+	tdb_new = tdb_open_ex(tmp_name,
 			      0,
-			      TDB_DEFAULT, 
+			      TDB_DEFAULT,
 			      O_RDONLY, 0,
 			      &log_ctx, NULL);
 	if (!tdb_new) {
@@ -204,7 +206,7 @@ static int backup_tdb(const char *old_name, const char *new_name, int hash_size)
 		free(tmp_name);
 		return 1;
 	}
-	
+
 	/* traverse the new tdb to confirm */
 	count2 = tdb_traverse(tdb_new, test_fn, NULL);
 	if (count2 != count1) {
@@ -237,7 +239,7 @@ static int verify_tdb(const char *fname, const char *bak_name)
 	int count = -1;
 
 	/* open the tdb */
-	tdb = tdb_open_ex(fname, 0, 0, 
+	tdb = tdb_open_ex(fname, 0, 0,
 			  O_RDONLY, 0, &log_ctx, NULL);
 
 	/* traverse the tdb, then close it */
@@ -249,7 +251,7 @@ static int verify_tdb(const char *fname, const char *bak_name)
 	/* count is < 0 means an error */
 	if (count < 0) {
 		printf("restoring %s\n", fname);
-		return backup_tdb(bak_name, fname, 0);
+		return backup_tdb(bak_name, fname, 0, 0);
 	}
 
 	printf("%s : %d records\n", fname, count);
@@ -279,8 +281,8 @@ static void usage(void)
 	printf("   -s suffix     set the backup suffix\n");
 	printf("   -v            verify mode (restore if corrupt)\n");
 	printf("   -n hashsize   set the new hash size for the backup\n");
+	printf("   -l            open without locking to back up mutex dbs\n");
 }
-		
 
  int main(int argc, char *argv[])
 {
@@ -289,11 +291,12 @@ static void usage(void)
 	int c;
 	int verify = 0;
 	int hashsize = 0;
+	int nolock = 0;
 	const char *suffix = ".bak";
 
 	log_ctx.log_fn = tdb_log;
 
-	while ((c = getopt(argc, argv, "vhs:n:")) != -1) {
+	while ((c = getopt(argc, argv, "vhs:n:l")) != -1) {
 		switch (c) {
 		case 'h':
 			usage();
@@ -306,6 +309,9 @@ static void usage(void)
 			break;
 		case 'n':
 			hashsize = atoi(optarg);
+			break;
+		case 'l':
+			nolock = 1;
 			break;
 		}
 	}
@@ -330,7 +336,8 @@ static void usage(void)
 			}
 		} else {
 			if (file_newer(fname, bak_name) &&
-			    backup_tdb(fname, bak_name, hashsize) != 0) {
+			    backup_tdb(fname, bak_name, hashsize,
+				       nolock) != 0) {
 				ret = 1;
 			}
 		}

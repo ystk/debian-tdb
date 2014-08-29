@@ -84,7 +84,7 @@ size_t rep_strlcpy(char *d, const char *s, size_t bufsize)
    be one more than the maximum resulting string length */
 size_t rep_strlcat(char *d, const char *s, size_t bufsize)
 {
-	size_t len1 = strlen(d);
+	size_t len1 = strnlen(d, bufsize);
 	size_t len2 = strlen(s);
 	size_t ret = len1 + len2;
 
@@ -212,16 +212,6 @@ int rep_initgroups(char *name, gid_t id)
 #endif /* HAVE_SETGROUPS */
 }
 #endif /* HAVE_INITGROUPS */
-
-
-#if (defined(SecureWare) && defined(SCO))
-/* This is needed due to needing the nap() function but we don't want
-   to include the Xenix libraries since that will break other things...
-   BTW: system call # 0x0c28 is the same as calling nap() */
-long nap(long milliseconds) {
-	 return syscall(0x0c28, milliseconds);
- }
-#endif
 
 
 #ifndef HAVE_MEMMOVE
@@ -412,10 +402,10 @@ int rep_mkstemp(char *template)
 {
 	/* have a reasonable go at emulating it. Hope that
 	   the system mktemp() isn't completely hopeless */
-	char *p = mktemp(template);
-	if (!p)
+	mktemp(template);
+	if (template[0] == 0)
 		return -1;
-	return open(p, O_CREAT|O_EXCL|O_RDWR, 0600);
+	return open(template, O_CREAT|O_EXCL|O_RDWR, 0600);
 }
 #endif
 
@@ -751,7 +741,7 @@ void *rep_memmem(const void *haystack, size_t haystacklen,
 }
 #endif
 
-#ifndef HAVE_VDPRINTF
+#if !defined(HAVE_VDPRINTF) || !defined(HAVE_C99_VSNPRINTF)
 int rep_vdprintf(int fd, const char *format, va_list ap)
 {
 	char *s = NULL;
@@ -768,7 +758,7 @@ int rep_vdprintf(int fd, const char *format, va_list ap)
 }
 #endif
 
-#ifndef HAVE_DPRINTF
+#if !defined(HAVE_DPRINTF) || !defined(HAVE_C99_VSNPRINTF)
 int rep_dprintf(int fd, const char *format, ...)
 {
 	int ret;
@@ -795,7 +785,7 @@ char *rep_get_current_dir_name(void)
 }
 #endif
 
-#if !defined(HAVE_STRERROR_R) || !defined(STRERROR_R_PROTO_COMPATIBLE)
+#ifndef HAVE_STRERROR_R
 int rep_strerror_r(int errnum, char *buf, size_t buflen)
 {
 	char *s = strerror(errnum);
@@ -904,3 +894,9 @@ int rep_usleep(useconds_t sec)
 	return 0;
 }
 #endif /* HAVE_USLEEP */
+
+#ifndef HAVE_SETPROCTITLE
+void rep_setproctitle(const char *fmt, ...)
+{
+}
+#endif

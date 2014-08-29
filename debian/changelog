@@ -1,3 +1,73 @@
+tdb (1.3.0-1.1) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * Cherry-pick patch from upstream bug #10625 to fix FTBFS of
+    reverse-build-deps which include <tdb.h> due to missing <stdbool.h>
+    include. (Closes: #750572)
+
+ -- Iain Lane <laney@debian.org>  Wed, 04 Jun 2014 16:10:40 +0100
+
+tdb (1.3.0-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Jelmer Vernooij <jelmer@debian.org>  Mon, 02 Jun 2014 01:17:31 +0200
+
+tdb (1.2.13-4) unstable; urgency=medium
+
+  * Fix libtdb-dev architecture to not build on hurd.
+  * Stop autopkgtest depending on build.
+
+ -- Jelmer Vernooij <jelmer@debian.org>  Sun, 25 May 2014 16:54:35 +0200
+
+tdb (1.2.13-3) unstable; urgency=medium
+
+  * Only build on linux-any and kfreebsd-any, since the Hurd does not
+    yet support byte range locking (bug #190367).
+
+ -- Jelmer Vernooij <jelmer@debian.org>  Sat, 24 May 2014 03:51:19 +0200
+
+tdb (1.2.13-2) unstable; urgency=medium
+
+  * Allow output on standard error from python testsuite.
+
+ -- Jelmer Vernooij <jelmer@debian.org>  Mon, 21 Apr 2014 14:46:36 +0200
+
+tdb (1.2.13-1) unstable; urgency=low
+
+  * New upstream release.
+  * Add basic autopkgtest for running python tests.
+  * Change maintainer to Samba Debian maintainers, move myself to uploaders.
+  * Bump standards version to 3.9.5 (no changes).
+  * Fix --as-needed with waf.
+
+ -- Jelmer Vernooij <jelmer@debian.org>  Tue, 20 Aug 2013 01:04:01 +0000
+
+tdb (1.2.12-1) unstable; urgency=low
+
+  [ Andrew Bartlett ]
+  * New upstream release.
+   + Drop 08_waf_python_config integrated upstream.
+   + Fixes two FTBFS bugs. Closes: #710342, #713098
+
+  [ Jelmer Vernooij ]
+  * Migrate to Git.
+  * Bump standards version to 3.9.4.
+  * Fix duplicate line in copyright file.
+  * Use dpkg-buildflags, enabling hardening.
+
+ -- Jelmer Vernooij <jelmer@debian.org>  Sun, 11 Aug 2013 13:37:12 +0000
+
+tdb (1.2.11-2.1) experimental; urgency=low
+
+  * Non-maintainer upload with maintainer's agreement.
+  * New upstream release.
+   + Add 08_waf_python_config to cope with python-config no longer
+     being a script.
+   + Adapt 40_test_transaction_expand_non_fatal.diff after conflicts
+
+ -- Andrew Bartlett <abartlet@samba.org>  Tue, 12 Feb 2013 20:43:55 +1100
+
 tdb (1.2.10-2) unstable; urgency=high
 
   [ Ivo De Decker ]

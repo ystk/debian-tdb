@@ -1,4 +1,4 @@
- /* 
+ /*
    Unix SMB/CIFS implementation.
 
    trivial database library
@@ -152,7 +152,7 @@ static int tdb_update_hash(struct tdb_context *tdb, TDB_DATA key, uint32_t hash,
 
 	/* it could be an exact duplicate of what is there - this is
 	 * surprisingly common (eg. with a ldb re-index). */
-	if (rec.key_len == key.dsize && 
+	if (rec.key_len == key.dsize &&
 	    rec.data_len == dbuf.dsize &&
 	    rec.full_hash == hash &&
 	    tdb_parse_record(tdb, key, tdb_update_hash_cmp, &dbuf) == 0) {
@@ -258,7 +258,7 @@ _PUBLIC_ int tdb_parse_record(struct tdb_context *tdb, TDB_DATA key,
 	return ret;
 }
 
-/* check if an entry in the database exists 
+/* check if an entry in the database exists
 
    note that 1 is returned if the key is found and 0 is returned if not found
    this doesn't match the conventions in the rest of this module, but is
@@ -345,13 +345,16 @@ static int tdb_count_dead(struct tdb_context *tdb, uint32_t hash)
 /*
  * Purge all DEAD records from a hash chain
  */
-static int tdb_purge_dead(struct tdb_context *tdb, uint32_t hash)
+int tdb_purge_dead(struct tdb_context *tdb, uint32_t hash)
 {
 	int res = -1;
 	struct tdb_record rec;
 	tdb_off_t rec_ptr;
 
-	if (tdb_lock(tdb, -1, F_WRLCK) == -1) {
+	if (tdb_lock_nonblock(tdb, -1, F_WRLCK) == -1) {
+		/*
+		 * Don't block the freelist if not strictly necessary
+		 */
 		return -1;
 	}
 
@@ -387,15 +390,19 @@ static int tdb_delete_hash(struct tdb_context *tdb, TDB_DATA key, uint32_t hash)
 	struct tdb_record rec;
 	int ret;
 
+	rec_ptr = tdb_find_lock_hash(tdb, key, hash, F_WRLCK, &rec);
+	if (rec_ptr == 0) {
+		return -1;
+	}
+
 	if (tdb->max_dead_records != 0) {
+
+		uint32_t magic = TDB_DEAD_MAGIC;
 
 		/*
 		 * Allow for some dead records per hash chain, mainly for
 		 * tdb's with a very high create/delete rate like locking.tdb.
 		 */
-
-		if (tdb_lock(tdb, BUCKET(hash), F_WRLCK) == -1)
-			return -1;
 
 		if (tdb_count_dead(tdb, hash) >= tdb->max_dead_records) {
 			/*
@@ -405,22 +412,14 @@ static int tdb_delete_hash(struct tdb_context *tdb, TDB_DATA key, uint32_t hash)
 			tdb_purge_dead(tdb, hash);
 		}
 
-		if (!(rec_ptr = tdb_find(tdb, key, hash, &rec))) {
-			tdb_unlock(tdb, BUCKET(hash), F_WRLCK);
-			return -1;
-		}
-
 		/*
 		 * Just mark the record as dead.
 		 */
-		rec.magic = TDB_DEAD_MAGIC;
-		ret = tdb_rec_write(tdb, rec_ptr, &rec);
+		ret = tdb_ofs_write(
+			tdb, rec_ptr + offsetof(struct tdb_record, magic),
+			&magic);
 	}
 	else {
-		if (!(rec_ptr = tdb_find_lock_hash(tdb, key, hash, F_WRLCK,
-						   &rec)))
-			return -1;
-
 		ret = tdb_do_delete(tdb, rec_ptr, &rec);
 	}
 
@@ -428,7 +427,7 @@ static int tdb_delete_hash(struct tdb_context *tdb, TDB_DATA key, uint32_t hash)
 		tdb_increment_seqnum(tdb);
 	}
 
-	if (tdb_unlock(tdb, BUCKET(rec.full_hash), F_WRLCK) != 0)
+	if (tdb_unlock(tdb, BUCKET(hash), F_WRLCK) != 0)
 		TDB_LOG((tdb, TDB_DEBUG_WARNING, "tdb_delete: WARNING tdb_unlock failed!\n"));
 	return ret;
 }
@@ -446,13 +445,21 @@ _PUBLIC_ int tdb_delete(struct tdb_context *tdb, TDB_DATA key)
 /*
  * See if we have a dead record around with enough space
  */
-static tdb_off_t tdb_find_dead(struct tdb_context *tdb, uint32_t hash,
-			       struct tdb_record *r, tdb_len_t length)
+tdb_off_t tdb_find_dead(struct tdb_context *tdb, uint32_t hash,
+			struct tdb_record *r, tdb_len_t length,
+			tdb_off_t *p_last_ptr)
 {
-	tdb_off_t rec_ptr;
+	tdb_off_t rec_ptr, last_ptr;
+	tdb_off_t best_rec_ptr = 0;
+	tdb_off_t best_last_ptr = 0;
+	struct tdb_record best = { .rec_len = UINT32_MAX };
+
+	length += sizeof(tdb_off_t); /* tailer */
+
+	last_ptr = TDB_HASH_TOP(hash);
 
 	/* read in the hash top */
-	if (tdb_ofs_read(tdb, TDB_HASH_TOP(hash), &rec_ptr) == -1)
+	if (tdb_ofs_read(tdb, last_ptr, &rec_ptr) == -1)
 		return 0;
 
 	/* keep looking until we find the right record */
@@ -460,16 +467,23 @@ static tdb_off_t tdb_find_dead(struct tdb_context *tdb, uint32_t hash,
 		if (tdb_rec_read(tdb, rec_ptr, r) == -1)
 			return 0;
 
-		if (TDB_DEAD(r) && r->rec_len >= length) {
-			/*
-			 * First fit for simple coding, TODO: change to best
-			 * fit
-			 */
-			return rec_ptr;
+		if (TDB_DEAD(r) && (r->rec_len >= length) &&
+		    (r->rec_len < best.rec_len)) {
+			best_rec_ptr = rec_ptr;
+			best_last_ptr = last_ptr;
+			best = *r;
 		}
+		last_ptr = rec_ptr;
 		rec_ptr = r->next;
 	}
-	return 0;
+
+	if (best.rec_len == UINT32_MAX) {
+		return 0;
+	}
+
+	*r = best;
+	*p_last_ptr = best_last_ptr;
+	return best_rec_ptr;
 }
 
 static int _tdb_store(struct tdb_context *tdb, TDB_DATA key,
@@ -506,55 +520,8 @@ static int _tdb_store(struct tdb_context *tdb, TDB_DATA key,
 	if (flag != TDB_INSERT)
 		tdb_delete_hash(tdb, key, hash);
 
-	if (tdb->max_dead_records != 0) {
-		/*
-		 * Allow for some dead records per hash chain, look if we can
-		 * find one that can hold the new record. We need enough space
-		 * for key, data and tailer. If we find one, we don't have to
-		 * consult the central freelist.
-		 */
-		rec_ptr = tdb_find_dead(
-			tdb, hash, &rec,
-			key.dsize + dbuf.dsize + sizeof(tdb_off_t));
-
-		if (rec_ptr != 0) {
-			rec.key_len = key.dsize;
-			rec.data_len = dbuf.dsize;
-			rec.full_hash = hash;
-			rec.magic = TDB_MAGIC;
-			if (tdb_rec_write(tdb, rec_ptr, &rec) == -1
-			    || tdb->methods->tdb_write(
-				    tdb, rec_ptr + sizeof(rec),
-				    key.dptr, key.dsize) == -1
-			    || tdb->methods->tdb_write(
-				    tdb, rec_ptr + sizeof(rec) + key.dsize,
-				    dbuf.dptr, dbuf.dsize) == -1) {
-				goto fail;
-			}
-			goto done;
-		}
-	}
-
-	/*
-	 * We have to allocate some space from the freelist, so this means we
-	 * have to lock it. Use the chance to purge all the DEAD records from
-	 * the hash chain under the freelist lock.
-	 */
-
-	if (tdb_lock(tdb, -1, F_WRLCK) == -1) {
-		goto fail;
-	}
-
-	if ((tdb->max_dead_records != 0)
-	    && (tdb_purge_dead(tdb, hash) == -1)) {
-		tdb_unlock(tdb, -1, F_WRLCK);
-		goto fail;
-	}
-
 	/* we have to allocate some space */
-	rec_ptr = tdb_allocate(tdb, key.dsize + dbuf.dsize, &rec);
-
-	tdb_unlock(tdb, -1, F_WRLCK);
+	rec_ptr = tdb_allocate(tdb, hash, key.dsize + dbuf.dsize, &rec);
 
 	if (rec_ptr == 0) {
 		goto fail;
@@ -713,7 +680,7 @@ _PUBLIC_ int tdb_get_seqnum(struct tdb_context *tdb)
 
 _PUBLIC_ int tdb_hash_size(struct tdb_context *tdb)
 {
-	return tdb->header.hash_size;
+	return tdb->hash_size;
 }
 
 _PUBLIC_ size_t tdb_map_size(struct tdb_context *tdb)
@@ -756,6 +723,15 @@ _PUBLIC_ void tdb_remove_flags(struct tdb_context *tdb, unsigned flags)
 		return;
 	}
 
+	if ((flags & TDB_NOLOCK) &&
+	    (tdb->feature_flags & TDB_FEATURE_FLAG_MUTEX) &&
+	    (tdb->mutexes == NULL)) {
+		tdb->ecode = TDB_ERR_LOCK;
+		TDB_LOG((tdb, TDB_DEBUG_FATAL, "tdb_remove_flags: "
+			 "Can not remove NOLOCK flag on mutexed databases"));
+		return;
+	}
+
 	if (flags & TDB_ALLOW_NESTING) {
 		tdb->flags |= TDB_DISALLOW_NESTING;
 	}
@@ -777,7 +753,7 @@ _PUBLIC_ void tdb_enable_seqnum(struct tdb_context *tdb)
 
 
 /*
-  add a region of the file to the freelist. Length is the size of the region in bytes, 
+  add a region of the file to the freelist. Length is the size of the region in bytes,
   which includes the free list header that needs to be added
  */
 static int tdb_free_region(struct tdb_context *tdb, tdb_off_t offset, ssize_t length)
@@ -789,7 +765,7 @@ static int tdb_free_region(struct tdb_context *tdb, tdb_off_t offset, ssize_t le
 	}
 	if (length + offset > tdb->map_size) {
 		TDB_LOG((tdb, TDB_DEBUG_FATAL,"tdb_free_region: adding region beyond end of file\n"));
-		return -1;		
+		return -1;
 	}
 	memset(&rec,'\0',sizeof(rec));
 	rec.rec_len = length - sizeof(rec);
@@ -835,12 +811,12 @@ _PUBLIC_ int tdb_wipe_all(struct tdb_context *tdb)
 		if (tdb->methods->tdb_read(tdb, recovery_head, &rec, sizeof(rec), DOCONV()) == -1) {
 			TDB_LOG((tdb, TDB_DEBUG_FATAL, "tdb_wipe_all: failed to read recovery record\n"));
 			return -1;
-		}	
+		}
 		recovery_size = rec.rec_len + sizeof(rec);
 	}
 
 	/* wipe the hashes */
-	for (i=0;i<tdb->header.hash_size;i++) {
+	for (i=0;i<tdb->hash_size;i++) {
 		if (tdb_ofs_write(tdb, TDB_HASH_TOP(i), &offset) == -1) {
 			TDB_LOG((tdb, TDB_DEBUG_FATAL,"tdb_wipe_all: failed to write hash %d\n", i));
 			goto failed;
@@ -853,25 +829,25 @@ _PUBLIC_ int tdb_wipe_all(struct tdb_context *tdb)
 		goto failed;
 	}
 
-	/* add all the rest of the file to the freelist, possibly leaving a gap 
+	/* add all the rest of the file to the freelist, possibly leaving a gap
 	   for the recovery area */
 	if (recovery_size == 0) {
 		/* the simple case - the whole file can be used as a freelist */
-		data_len = (tdb->map_size - TDB_DATA_START(tdb->header.hash_size));
-		if (tdb_free_region(tdb, TDB_DATA_START(tdb->header.hash_size), data_len) != 0) {
+		data_len = (tdb->map_size - TDB_DATA_START(tdb->hash_size));
+		if (tdb_free_region(tdb, TDB_DATA_START(tdb->hash_size), data_len) != 0) {
 			goto failed;
 		}
 	} else {
 		/* we need to add two freelist entries - one on either
-		   side of the recovery area 
+		   side of the recovery area
 
 		   Note that we cannot shift the recovery area during
 		   this operation. Only the transaction.c code may
 		   move the recovery area or we risk subtle data
 		   corruption
 		*/
-		data_len = (recovery_head - TDB_DATA_START(tdb->header.hash_size));
-		if (tdb_free_region(tdb, TDB_DATA_START(tdb->header.hash_size), data_len) != 0) {
+		data_len = (recovery_head - TDB_DATA_START(tdb->hash_size));
+		if (tdb_free_region(tdb, TDB_DATA_START(tdb->hash_size), data_len) != 0) {
 			goto failed;
 		}
 		/* and the 2nd free list entry after the recovery area - if any */
@@ -942,7 +918,7 @@ _PUBLIC_ int tdb_repack(struct tdb_context *tdb)
 		TDB_LOG((tdb, TDB_DEBUG_FATAL, __location__ " Failed to traverse copying out\n"));
 		tdb_transaction_cancel(tdb);
 		tdb_close(tmp_db);
-		return -1;		
+		return -1;
 	}
 
 	if (state.error) {
@@ -966,7 +942,7 @@ _PUBLIC_ int tdb_repack(struct tdb_context *tdb)
 		TDB_LOG((tdb, TDB_DEBUG_FATAL, __location__ " Failed to traverse copying back\n"));
 		tdb_transaction_cancel(tdb);
 		tdb_close(tmp_db);
-		return -1;		
+		return -1;
 	}
 
 	if (state.error) {
@@ -997,6 +973,17 @@ bool tdb_write_all(int fd, const void *buf, size_t count)
 		buf = (const char *)buf + ret;
 		count -= ret;
 	}
+	return true;
+}
+
+bool tdb_add_off_t(tdb_off_t a, tdb_off_t b, tdb_off_t *pret)
+{
+	tdb_off_t ret = a + b;
+
+	if ((ret < a) || (ret < b)) {
+		return false;
+	}
+	*pret = ret;
 	return true;
 }
 

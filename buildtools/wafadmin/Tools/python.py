@@ -6,10 +6,11 @@
 "Python support"
 
 import os, sys
-import TaskGen, Utils, Utils, Runner, Options, Build
+import TaskGen, Utils, Options
 from Logs import debug, warn, info
-from TaskGen import extension, taskgen, before, after, feature
+from TaskGen import extension, before, after, feature
 from Configure import conf
+from config_c import parse_flags
 
 EXT_PY = ['.py']
 FRAG_2 = '''
@@ -136,8 +137,8 @@ def _get_python_variables(python_exe, variables, imports=['import sys']):
 			continue
 		if s == 'None':
 			return_values.append(None)
-		elif s[0] == "'" and s[-1] == "'":
-			return_values.append(s[1:-1])
+		elif (s[0] == "'" and s[-1] == "'") or (s[0] == '"' and s[-1] == '"'):
+			return_values.append(eval(s))
 		elif s[0].isdigit():
 			return_values.append(int(s))
 		else: break
@@ -173,7 +174,7 @@ def check_python_headers(conf, mandatory=True):
 		(python_prefix, python_SO, python_SYSLIBS, python_LDFLAGS, python_SHLIBS,
 		 python_LIBDIR, python_LIBPL, INCLUDEPY, Py_ENABLE_SHARED,
 		 python_MACOSX_DEPLOYMENT_TARGET) = \
-			_get_python_variables(python, ["get_config_var('%s')" % x for x in v],
+			_get_python_variables(python, ["get_config_var('%s') or ''" % x for x in v],
 					      ['from distutils.sysconfig import get_config_var'])
 	except RuntimeError:
 		conf.fatal("Python development headers not found (-v for details).")
@@ -191,6 +192,19 @@ Py_ENABLE_SHARED = %r
 MACOSX_DEPLOYMENT_TARGET = %r
 """ % (python, python_prefix, python_SO, python_SYSLIBS, python_LDFLAGS, python_SHLIBS,
 	python_LIBDIR, python_LIBPL, INCLUDEPY, Py_ENABLE_SHARED, python_MACOSX_DEPLOYMENT_TARGET))
+
+	# Allow some python overrides from env vars for cross-compiling
+	os_env = dict(os.environ)
+
+	override_python_LDFLAGS = os_env.get('python_LDFLAGS', None)
+	if override_python_LDFLAGS is not None:
+		conf.log.write("python_LDFLAGS override from environment = %r\n" % (override_python_LDFLAGS))
+		python_LDFLAGS = override_python_LDFLAGS
+
+	override_python_LIBDIR = os_env.get('python_LIBDIR', None)
+	if override_python_LIBDIR is not None:
+		conf.log.write("python_LIBDIR override from environment = %r\n" % (override_python_LIBDIR))
+		python_LIBDIR = override_python_LIBDIR
 
 	if python_MACOSX_DEPLOYMENT_TARGET:
 		conf.env['MACOSX_DEPLOYMENT_TARGET'] = python_MACOSX_DEPLOYMENT_TARGET
@@ -213,7 +227,7 @@ MACOSX_DEPLOYMENT_TARGET = %r
 				env.append_value('LINKFLAGS_PYEMBED', lib)
 
 	if Options.platform != 'darwin' and python_LDFLAGS:
-		env.append_value('LINKFLAGS_PYEMBED', python_LDFLAGS.split())
+		parse_flags(python_LDFLAGS, 'PYEMBED', env)
 
 	result = False
 	name = 'python' + env['PYTHON_VERSION']
@@ -259,7 +273,7 @@ MACOSX_DEPLOYMENT_TARGET = %r
 
 	includes = []
 	if python_config:
-		for incstr in Utils.cmd_output("%s %s --includes" % (python, python_config)).strip().split():
+		for incstr in Utils.cmd_output("%s --includes" % (python_config,)).strip().split():
 			# strip the -I or /I
 			if (incstr.startswith('-I')
 			    or incstr.startswith('/I')):
@@ -310,7 +324,7 @@ def check_python_version(conf, minver=None):
 	# Get python version string
 	cmd = [python, "-c", "import sys\nfor x in sys.version_info: print(str(x))"]
 	debug('python: Running python command %r' % cmd)
-	proc = Utils.pproc.Popen(cmd, stdout=Utils.pproc.PIPE)
+	proc = Utils.pproc.Popen(cmd, stdout=Utils.pproc.PIPE, shell=False)
 	lines = proc.communicate()[0].split()
 	assert len(lines) == 5, "found %i lines, expected 5: %r" % (len(lines), lines)
 	pyver_tuple = (int(lines[0]), int(lines[1]), int(lines[2]), lines[3], int(lines[4]))
@@ -329,14 +343,14 @@ def check_python_version(conf, minver=None):
 			if sys.platform == 'win32':
 				(python_LIBDEST, pydir) = \
 						_get_python_variables(python,
-											  ["get_config_var('LIBDEST')",
-											   "get_python_lib(standard_lib=0, prefix=%r)" % conf.env['PREFIX']],
+											  ["get_config_var('LIBDEST') or ''",
+											   "get_python_lib(standard_lib=0, prefix=%r) or ''" % conf.env['PREFIX']],
 											  ['from distutils.sysconfig import get_config_var, get_python_lib'])
 			else:
 				python_LIBDEST = None
 				(pydir,) = \
 						_get_python_variables(python,
-											  ["get_python_lib(standard_lib=0, prefix=%r)" % conf.env['PREFIX']],
+											  ["get_python_lib(standard_lib=0, prefix=%r) or ''" % conf.env['PREFIX']],
 											  ['from distutils.sysconfig import get_config_var, get_python_lib'])
 			if python_LIBDEST is None:
 				if conf.env['LIBDIR']:
@@ -348,7 +362,7 @@ def check_python_version(conf, minver=None):
 			pyarchdir = conf.environ['PYTHONARCHDIR']
 		else:
 			(pyarchdir,) = _get_python_variables(python,
-											["get_python_lib(plat_specific=1, standard_lib=0, prefix=%r)" % conf.env['PREFIX']],
+											["get_python_lib(plat_specific=1, standard_lib=0, prefix=%r) or ''" % conf.env['PREFIX']],
 											['from distutils.sysconfig import get_config_var, get_python_lib'])
 			if not pyarchdir:
 				pyarchdir = pydir
@@ -390,8 +404,10 @@ def detect(conf):
 	if not python:
 		conf.fatal('Could not find the path of the python executable')
 
-	v = conf.env
+	if conf.env.PYTHON != sys.executable:
+		warn("python executable '%s' different from sys.executable '%s'" % (conf.env.PYTHON, sys.executable))
 
+	v = conf.env
 	v['PYCMD'] = '"import sys, py_compile;py_compile.compile(sys.argv[1], sys.argv[2])"'
 	v['PYFLAGS'] = ''
 	v['PYFLAGS_OPT'] = '-O'

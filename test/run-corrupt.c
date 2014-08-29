@@ -9,9 +9,9 @@
 #include "../common/open.c"
 #include "../common/check.c"
 #include "../common/hash.c"
+#include "../common/mutex.c"
 #include "tap-interface.h"
 #include <stdlib.h>
-#include <err.h>
 #include "logging.h"
 
 static int check(TDB_DATA key, TDB_DATA data, void *private)
@@ -42,11 +42,15 @@ static void tdb_flip_bit(struct tdb_context *tdb, unsigned int bit)
 		((unsigned char *)tdb->map_ptr)[off] ^= mask;
 	else {
 		unsigned char c;
-		if (pread(tdb->fd, &c, 1, off) != 1)
-			err(1, "pread");
+		if (pread(tdb->fd, &c, 1, off) != 1) {
+			fprintf(stderr, "pread: %s\n", strerror(errno));
+			exit(1);
+		}
 		c ^= mask;
-		if (pwrite(tdb->fd, &c, 1, off) != 1)
-			err(1, "pwrite");
+		if (pwrite(tdb->fd, &c, 1, off) != 1) {
+			fprintf(stderr, "pwrite: %s\n", strerror(errno));
+			exit(1);
+		}
 	}
 }
 
@@ -57,9 +61,9 @@ static void check_test(struct tdb_context *tdb)
 
 	ok1(tdb_check(tdb, NULL, NULL) == 0);
 
-	key.dptr = (void *)"hello";
+	key.dptr = discard_const_p(uint8_t, "hello");
 	data.dsize = strlen("world");
-	data.dptr = (void *)"world";
+	data.dptr = discard_const_p(uint8_t, "world");
 
 	/* Key and data size respectively. */
 	dsize = ksize = 0;

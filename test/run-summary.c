@@ -10,9 +10,9 @@
 #include "../common/check.c"
 #include "../common/hash.c"
 #include "../common/summary.c"
+#include "../common/mutex.c"
 #include "tap-interface.h"
 #include <stdlib.h>
-#include <err.h>
 
 int main(int argc, char *argv[])
 {

@@ -1,4 +1,4 @@
- /* 
+ /*
    Unix SMB/CIFS implementation.
 
    trivial database library
@@ -51,7 +51,8 @@ void tdb_header_hash(struct tdb_context *tdb,
 }
 
 /* initialise a new database with a specified hash size */
-static int tdb_new_database(struct tdb_context *tdb, int hash_size)
+static int tdb_new_database(struct tdb_context *tdb, struct tdb_header *header,
+			    int hash_size)
 {
 	struct tdb_header *newdb;
 	size_t size;
@@ -75,10 +76,36 @@ static int tdb_new_database(struct tdb_context *tdb, int hash_size)
 	if (tdb->flags & TDB_INCOMPATIBLE_HASH)
 		newdb->rwlocks = TDB_HASH_RWLOCK_MAGIC;
 
+	/*
+	 * We create a tdb with TDB_FEATURE_FLAG_MUTEX support,
+	 * the flag combination and runtime feature checks
+	 * are done by the caller already.
+	 */
+	if (tdb->flags & TDB_MUTEX_LOCKING) {
+		newdb->feature_flags |= TDB_FEATURE_FLAG_MUTEX;
+	}
+
+	/*
+	 * If we have any features we add the FEATURE_FLAG_MAGIC, overwriting the
+	 * TDB_HASH_RWLOCK_MAGIC above.
+	 */
+	if (newdb->feature_flags != 0) {
+		newdb->rwlocks = TDB_FEATURE_FLAG_MAGIC;
+	}
+
+	/*
+	 * It's required for some following code pathes
+	 * to have the fields on 'tdb' up-to-date.
+	 *
+	 * E.g. tdb_mutex_size() requires it
+	 */
+	tdb->feature_flags = newdb->feature_flags;
+	tdb->hash_size = newdb->hash_size;
+
 	if (tdb->flags & TDB_INTERNAL) {
 		tdb->map_size = size;
 		tdb->map_ptr = (char *)newdb;
-		memcpy(&tdb->header, newdb, sizeof(tdb->header));
+		memcpy(header, newdb, sizeof(*header));
 		/* Convert the `ondisk' version if asked. */
 		CONVERT(*newdb);
 		return 0;
@@ -89,15 +116,52 @@ static int tdb_new_database(struct tdb_context *tdb, int hash_size)
 	if (ftruncate(tdb->fd, 0) == -1)
 		goto fail;
 
+	if (newdb->feature_flags & TDB_FEATURE_FLAG_MUTEX) {
+		newdb->mutex_size = tdb_mutex_size(tdb);
+		tdb->hdr_ofs = newdb->mutex_size;
+	}
+
 	/* This creates an endian-converted header, as if read from disk */
 	CONVERT(*newdb);
-	memcpy(&tdb->header, newdb, sizeof(tdb->header));
+	memcpy(header, newdb, sizeof(*header));
 	/* Don't endian-convert the magic food! */
 	memcpy(newdb->magic_food, TDB_MAGIC_FOOD, strlen(TDB_MAGIC_FOOD)+1);
-	/* we still have "ret == -1" here */
-	if (tdb_write_all(tdb->fd, newdb, size))
-		ret = 0;
 
+	if (!tdb_write_all(tdb->fd, newdb, size))
+		goto fail;
+
+	if (newdb->feature_flags & TDB_FEATURE_FLAG_MUTEX) {
+
+		/*
+		 * Now we init the mutex area
+		 * followed by a second header.
+		 */
+
+		ret = ftruncate(
+			tdb->fd,
+			newdb->mutex_size + sizeof(struct tdb_header));
+		if (ret == -1) {
+			goto fail;
+		}
+		ret = tdb_mutex_init(tdb);
+		if (ret == -1) {
+			goto fail;
+		}
+
+		/*
+		 * Write a second header behind the mutexes. That's the area
+		 * that will be mmapp'ed.
+		 */
+		ret = lseek(tdb->fd, newdb->mutex_size, SEEK_SET);
+		if (ret == -1) {
+			goto fail;
+		}
+		if (!tdb_write_all(tdb->fd, newdb, size)) {
+			goto fail;
+		}
+	}
+
+	ret = 0;
   fail:
 	SAFE_FREE(newdb);
 	return ret;
@@ -119,13 +183,13 @@ static int tdb_already_open(dev_t device,
 	return 0;
 }
 
-/* open the database, creating it if necessary 
+/* open the database, creating it if necessary
 
    The open_flags and mode are passed straight to the open call on the
    database file. A flags value of O_WRONLY is invalid. The hash size
    is advisory, use zero for a default value.
 
-   Return is NULL on error, in which case errno is also set.  Don't 
+   Return is NULL on error, in which case errno is also set.  Don't
    try to call tdb_error or tdb_errname, just do strerror(errno).
 
    @param name may be NULL for internal databases. */
@@ -142,11 +206,12 @@ static void null_log_fn(struct tdb_context *tdb, enum tdb_debug_level level, con
 }
 
 static bool check_header_hash(struct tdb_context *tdb,
+			      struct tdb_header *header,
 			      bool default_hash, uint32_t *m1, uint32_t *m2)
 {
 	tdb_header_hash(tdb, m1, m2);
-	if (tdb->header.magic1_hash == *m1 &&
-	    tdb->header.magic2_hash == *m2) {
+	if (header->magic1_hash == *m1 &&
+	    header->magic2_hash == *m2) {
 		return true;
 	}
 
@@ -159,7 +224,71 @@ static bool check_header_hash(struct tdb_context *tdb,
 		tdb->hash_fn = tdb_jenkins_hash;
 	else
 		tdb->hash_fn = tdb_old_hash;
-	return check_header_hash(tdb, false, m1, m2);
+	return check_header_hash(tdb, header, false, m1, m2);
+}
+
+static bool tdb_mutex_open_ok(struct tdb_context *tdb,
+			      const struct tdb_header *header)
+{
+	int locked;
+
+	locked = tdb_nest_lock(tdb, ACTIVE_LOCK, F_WRLCK,
+			       TDB_LOCK_NOWAIT|TDB_LOCK_PROBE);
+
+	if ((locked == -1) && (tdb->ecode == TDB_ERR_LOCK)) {
+		/*
+		 * CLEAR_IF_FIRST still active. The tdb was created on this
+		 * host, so we can assume the mutex implementation is
+		 * compatible. Important for tools like tdbdump on a still
+		 * open locking.tdb.
+		 */
+		goto check_local_settings;
+	}
+
+	/*
+	 * We got the CLEAR_IF_FIRST lock. That means the database was
+	 * potentially copied from somewhere else. The mutex implementation
+	 * might be incompatible.
+	 */
+
+	if (tdb_nest_unlock(tdb, ACTIVE_LOCK, F_WRLCK, false) == -1) {
+		/*
+		 * Should not happen
+		 */
+		TDB_LOG((tdb, TDB_DEBUG_ERROR, "tdb_mutex_open_ok: "
+			 "failed to release ACTIVE_LOCK on %s: %s\n",
+			 tdb->name, strerror(errno)));
+		return false;
+	}
+
+	if (tdb->flags & TDB_NOLOCK) {
+		/*
+		 * We don't look at locks, so it does not matter to have a
+		 * compatible mutex implementation. Allow the open.
+		 */
+		return true;
+	}
+
+check_local_settings:
+
+	if (!(tdb->flags & TDB_MUTEX_LOCKING)) {
+		TDB_LOG((tdb, TDB_DEBUG_ERROR, "tdb_mutex_open_ok[%s]: "
+			 "Can use mutexes only with "
+			 "MUTEX_LOCKING or NOLOCK\n",
+			 tdb->name));
+		return false;
+	}
+
+	if (tdb_mutex_size(tdb) != header->mutex_size) {
+		TDB_LOG((tdb, TDB_DEBUG_ERROR, "tdb_mutex_open_ok[%s]: "
+			 "Mutex size changed from %u to %u\n.",
+			 tdb->name,
+			 (unsigned int)header->mutex_size,
+			 (unsigned int)tdb_mutex_size(tdb)));
+		return false;
+	}
+
+	return true;
 }
 
 _PUBLIC_ struct tdb_context *tdb_open_ex(const char *name, int hash_size, int tdb_flags,
@@ -167,6 +296,8 @@ _PUBLIC_ struct tdb_context *tdb_open_ex(const char *name, int hash_size, int td
 				const struct tdb_logging_context *log_ctx,
 				tdb_hash_func hash_fn)
 {
+	int orig_errno = errno;
+	struct tdb_header header;
 	struct tdb_context *tdb;
 	struct stat st;
 	int rev = 0, locked = 0;
@@ -175,6 +306,9 @@ _PUBLIC_ struct tdb_context *tdb_open_ex(const char *name, int hash_size, int td
 	unsigned v;
 	const char *hash_alg;
 	uint32_t magic1, magic2;
+	int ret;
+
+	ZERO_STRUCT(header);
 
 	if (!(tdb = (struct tdb_context *)calloc(1, sizeof *tdb))) {
 		/* Can't log this */
@@ -182,6 +316,14 @@ _PUBLIC_ struct tdb_context *tdb_open_ex(const char *name, int hash_size, int td
 		goto fail;
 	}
 	tdb_io_init(tdb);
+
+	if (tdb_flags & TDB_INTERNAL) {
+		tdb_flags |= TDB_INCOMPATIBLE_HASH;
+	}
+	if (tdb_flags & TDB_MUTEX_LOCKING) {
+		tdb_flags |= TDB_INCOMPATIBLE_HASH;
+	}
+
 	tdb->fd = -1;
 #ifdef TDB_TRACE
 	tdb->tracefd = -1;
@@ -209,7 +351,7 @@ _PUBLIC_ struct tdb_context *tdb_open_ex(const char *name, int hash_size, int td
 		goto fail;
 	}
 
-	/* now make a copy of the name, as the caller memory might went away */
+	/* now make a copy of the name, as the caller memory might go away */
 	if (!(tdb->name = (char *)strdup(name))) {
 		/*
 		 * set the name as the given string, so that tdb_name() will
@@ -269,6 +411,64 @@ _PUBLIC_ struct tdb_context *tdb_open_ex(const char *name, int hash_size, int td
 		goto fail;
 	}
 
+	if (tdb->flags & TDB_MUTEX_LOCKING) {
+		/*
+		 * Here we catch bugs in the callers,
+		 * the runtime check for existing tdb's comes later.
+		 */
+
+		if (!(tdb->flags & TDB_CLEAR_IF_FIRST)) {
+			TDB_LOG((tdb, TDB_DEBUG_ERROR, "tdb_open_ex: "
+				"invalid flags for %s - TDB_MUTEX_LOCKING "
+				"requires TDB_CLEAR_IF_FIRST\n", name));
+			errno = EINVAL;
+			goto fail;
+		}
+
+		if (tdb->flags & TDB_INTERNAL) {
+			TDB_LOG((tdb, TDB_DEBUG_ERROR, "tdb_open_ex: "
+				"invalid flags for %s - TDB_MUTEX_LOCKING and "
+				"TDB_INTERNAL are not allowed together\n", name));
+			errno = EINVAL;
+			goto fail;
+		}
+
+		if (tdb->flags & TDB_NOMMAP) {
+			TDB_LOG((tdb, TDB_DEBUG_ERROR, "tdb_open_ex: "
+				"invalid flags for %s - TDB_MUTEX_LOCKING and "
+				"TDB_NOMMAP are not allowed together\n", name));
+			errno = EINVAL;
+			goto fail;
+		}
+
+		if (tdb->read_only) {
+			TDB_LOG((tdb, TDB_DEBUG_ERROR, "tdb_open_ex: "
+				"invalid flags for %s - TDB_MUTEX_LOCKING "
+				"not allowed read only\n", name));
+			errno = EINVAL;
+			goto fail;
+		}
+
+		/*
+		 * The callers should have called
+		 * tdb_runtime_check_for_robust_mutexes()
+		 * before using TDB_MUTEX_LOCKING!
+		 *
+		 * This makes sure the caller understands
+		 * that the locking may behave a bit differently
+		 * than with pure fcntl locking. E.g. multiple
+		 * read locks are not supported.
+		 */
+		if (!tdb_runtime_check_for_robust_mutexes()) {
+			TDB_LOG((tdb, TDB_DEBUG_ERROR, "tdb_open_ex: "
+				"invalid flags for %s - TDB_MUTEX_LOCKING "
+				"requires support for robust_mutexes\n",
+				name));
+			errno = ENOSYS;
+			goto fail;
+		}
+	}
+
 	if (getenv("TDB_NO_FSYNC")) {
 		tdb->flags |= TDB_NOSYNC;
 	}
@@ -285,10 +485,11 @@ _PUBLIC_ struct tdb_context *tdb_open_ex(const char *name, int hash_size, int td
 	if (tdb->flags & TDB_INTERNAL) {
 		tdb->flags |= (TDB_NOLOCK | TDB_NOMMAP);
 		tdb->flags &= ~TDB_CLEAR_IF_FIRST;
-		if (tdb_new_database(tdb, hash_size) != 0) {
+		if (tdb_new_database(tdb, &header, hash_size) != 0) {
 			TDB_LOG((tdb, TDB_DEBUG_ERROR, "tdb_open_ex: tdb_new_database failed!"));
 			goto fail;
 		}
+		tdb->hash_size = hash_size;
 		goto internal;
 	}
 
@@ -313,32 +514,56 @@ _PUBLIC_ struct tdb_context *tdb_open_ex(const char *name, int hash_size, int td
 	if ((tdb_flags & TDB_CLEAR_IF_FIRST) &&
 	    (!tdb->read_only) &&
 	    (locked = (tdb_nest_lock(tdb, ACTIVE_LOCK, F_WRLCK, TDB_LOCK_NOWAIT|TDB_LOCK_PROBE) == 0))) {
-		open_flags |= O_CREAT;
-		if (ftruncate(tdb->fd, 0) == -1) {
+		ret = tdb_brlock(tdb, F_WRLCK, FREELIST_TOP, 0,
+				 TDB_LOCK_WAIT);
+		if (ret == -1) {
 			TDB_LOG((tdb, TDB_DEBUG_FATAL, "tdb_open_ex: "
-				 "failed to truncate %s: %s\n",
+				 "tdb_brlock failed for %s: %s\n",
 				 name, strerror(errno)));
-			goto fail; /* errno set by ftruncate */
+			goto fail;
+		}
+		ret = tdb_new_database(tdb, &header, hash_size);
+		if (ret == -1) {
+			TDB_LOG((tdb, TDB_DEBUG_FATAL, "tdb_open_ex: "
+				 "tdb_new_database failed for %s: %s\n",
+				 name, strerror(errno)));
+			tdb_unlockall(tdb);
+			goto fail;
+		}
+		ret = tdb_brunlock(tdb, F_WRLCK, FREELIST_TOP, 0);
+		if (ret == -1) {
+			TDB_LOG((tdb, TDB_DEBUG_FATAL, "tdb_open_ex: "
+				 "tdb_unlockall failed for %s: %s\n",
+				 name, strerror(errno)));
+			goto fail;
+		}
+		ret = lseek(tdb->fd, 0, SEEK_SET);
+		if (ret == -1) {
+			TDB_LOG((tdb, TDB_DEBUG_FATAL, "tdb_open_ex: "
+				 "lseek failed for %s: %s\n",
+				 name, strerror(errno)));
+			goto fail;
 		}
 	}
 
 	errno = 0;
-	if (read(tdb->fd, &tdb->header, sizeof(tdb->header)) != sizeof(tdb->header)
-	    || strcmp(tdb->header.magic_food, TDB_MAGIC_FOOD) != 0) {
-		if (!(open_flags & O_CREAT) || tdb_new_database(tdb, hash_size) == -1) {
+	if (read(tdb->fd, &header, sizeof(header)) != sizeof(header)
+	    || strcmp(header.magic_food, TDB_MAGIC_FOOD) != 0) {
+		if (!(open_flags & O_CREAT) ||
+		    tdb_new_database(tdb, &header, hash_size) == -1) {
 			if (errno == 0) {
 				errno = EIO; /* ie bad format or something */
 			}
 			goto fail;
 		}
 		rev = (tdb->flags & TDB_CONVERT);
-	} else if (tdb->header.version != TDB_VERSION
-		   && !(rev = (tdb->header.version==TDB_BYTEREV(TDB_VERSION)))) {
+	} else if (header.version != TDB_VERSION
+		   && !(rev = (header.version==TDB_BYTEREV(TDB_VERSION)))) {
 		/* wrong version */
 		errno = EIO;
 		goto fail;
 	}
-	vp = (unsigned char *)&tdb->header.version;
+	vp = (unsigned char *)&header.version;
 	vertest = (((uint32_t)vp[0]) << 24) | (((uint32_t)vp[1]) << 16) |
 		  (((uint32_t)vp[2]) << 8) | (uint32_t)vp[3];
 	tdb->flags |= (vertest==TDB_VERSION) ? TDB_BIGENDIAN : 0;
@@ -346,59 +571,109 @@ _PUBLIC_ struct tdb_context *tdb_open_ex(const char *name, int hash_size, int td
 		tdb->flags &= ~TDB_CONVERT;
 	else {
 		tdb->flags |= TDB_CONVERT;
-		tdb_convert(&tdb->header, sizeof(tdb->header));
+		tdb_convert(&header, sizeof(header));
 	}
-	if (fstat(tdb->fd, &st) == -1)
-		goto fail;
 
-	if (tdb->header.rwlocks != 0 &&
-	    tdb->header.rwlocks != TDB_HASH_RWLOCK_MAGIC) {
+	/*
+	 * We only use st.st_dev and st.st_ino from the raw fstat()
+	 * call, everything else needs to use tdb_fstat() in order
+	 * to skip tdb->hdr_ofs!
+	 */
+	if (fstat(tdb->fd, &st) == -1) {
+		goto fail;
+	}
+	tdb->device = st.st_dev;
+	tdb->inode = st.st_ino;
+	ZERO_STRUCT(st);
+
+	if (header.rwlocks != 0 &&
+	    header.rwlocks != TDB_FEATURE_FLAG_MAGIC &&
+	    header.rwlocks != TDB_HASH_RWLOCK_MAGIC) {
 		TDB_LOG((tdb, TDB_DEBUG_ERROR, "tdb_open_ex: spinlocks no longer supported\n"));
+		errno = ENOSYS;
+		goto fail;
+	}
+	tdb->hash_size = header.hash_size;
+
+	if (header.rwlocks == TDB_FEATURE_FLAG_MAGIC) {
+		tdb->feature_flags = header.feature_flags;
+	}
+
+	if (tdb->feature_flags & ~TDB_SUPPORTED_FEATURE_FLAGS) {
+		TDB_LOG((tdb, TDB_DEBUG_ERROR, "tdb_open_ex: unsupported "
+			 "features in tdb %s: 0x%08x (supported: 0x%08x)\n",
+			 name, (unsigned)tdb->feature_flags,
+			 (unsigned)TDB_SUPPORTED_FEATURE_FLAGS));
+		errno = ENOSYS;
 		goto fail;
 	}
 
-	if ((tdb->header.magic1_hash == 0) && (tdb->header.magic2_hash == 0)) {
+	if (tdb->feature_flags & TDB_FEATURE_FLAG_MUTEX) {
+		if (!tdb_mutex_open_ok(tdb, &header)) {
+			errno = EINVAL;
+			goto fail;
+		}
+
+		/*
+		 * We need to remember the hdr_ofs
+		 * also for the TDB_NOLOCK case
+		 * if the current library doesn't support
+		 * mutex locking.
+		 */
+		tdb->hdr_ofs = header.mutex_size;
+	}
+
+	if ((header.magic1_hash == 0) && (header.magic2_hash == 0)) {
 		/* older TDB without magic hash references */
 		tdb->hash_fn = tdb_old_hash;
-	} else if (!check_header_hash(tdb, !hash_fn, &magic1, &magic2)) {
+	} else if (!check_header_hash(tdb, &header, !hash_fn,
+				      &magic1, &magic2)) {
 		TDB_LOG((tdb, TDB_DEBUG_FATAL, "tdb_open_ex: "
 			 "%s was not created with %s hash function we are using\n"
 			 "magic1_hash[0x%08X %s 0x%08X] "
 			 "magic2_hash[0x%08X %s 0x%08X]\n",
 			 name, hash_alg,
-			 tdb->header.magic1_hash,
-			 (tdb->header.magic1_hash == magic1) ? "==" : "!=",
+			 header.magic1_hash,
+			 (header.magic1_hash == magic1) ? "==" : "!=",
 			 magic1,
-			 tdb->header.magic2_hash,
-			 (tdb->header.magic2_hash == magic2) ? "==" : "!=",
+			 header.magic2_hash,
+			 (header.magic2_hash == magic2) ? "==" : "!=",
 			 magic2));
 		errno = EINVAL;
 		goto fail;
 	}
 
 	/* Is it already in the open list?  If so, fail. */
-	if (tdb_already_open(st.st_dev, st.st_ino)) {
+	if (tdb_already_open(tdb->device, tdb->inode)) {
 		TDB_LOG((tdb, TDB_DEBUG_ERROR, "tdb_open_ex: "
 			 "%s (%d,%d) is already open in this process\n",
-			 name, (int)st.st_dev, (int)st.st_ino));
+			 name, (int)tdb->device, (int)tdb->inode));
 		errno = EBUSY;
 		goto fail;
 	}
 
-	/* Beware truncation! */
-	tdb->map_size = st.st_size;
-	if (tdb->map_size != st.st_size) {
-		/* Ensure ecode is set for log fn. */
-		tdb->ecode = TDB_ERR_IO;
-		TDB_LOG((tdb, TDB_DEBUG_FATAL, "tdb_open_ex: "
-			 "len %llu too large!\n", (long long)st.st_size));
+	/*
+	 * We had tdb_mmap(tdb) here before,
+	 * but we need to use tdb_fstat(),
+	 * which is triggered from tdb_oob() before calling tdb_mmap().
+	 * As this skips tdb->hdr_ofs.
+	 */
+	tdb->map_size = 0;
+	ret = tdb->methods->tdb_oob(tdb, 0, 1, 0);
+	if (ret == -1) {
 		errno = EIO;
 		goto fail;
 	}
 
-	tdb->device = st.st_dev;
-	tdb->inode = st.st_ino;
-	tdb_mmap(tdb);
+	if (tdb->feature_flags & TDB_FEATURE_FLAG_MUTEX) {
+		if (!(tdb->flags & TDB_NOLOCK)) {
+			ret = tdb_mutex_mmap(tdb);
+			if (ret != 0) {
+				goto fail;
+			}
+		}
+	}
+
 	if (locked) {
 		if (tdb_nest_unlock(tdb, ACTIVE_LOCK, F_WRLCK, false) == -1) {
 			TDB_LOG((tdb, TDB_DEBUG_ERROR, "tdb_open_ex: "
@@ -450,6 +725,7 @@ _PUBLIC_ struct tdb_context *tdb_open_ex(const char *name, int hash_size, int td
 	}
 	tdb->next = tdbs;
 	tdbs = tdb;
+	errno = orig_errno;
 	return tdb;
 
  fail:
@@ -508,6 +784,9 @@ _PUBLIC_ int tdb_close(struct tdb_context *tdb)
 		else
 			tdb_munmap(tdb);
 	}
+
+	tdb_mutex_munmap(tdb);
+
 	SAFE_FREE(tdb->name);
 	if (tdb->fd != -1) {
 		ret = close(tdb->fd);
@@ -579,6 +858,11 @@ static int tdb_reopen_internal(struct tdb_context *tdb, bool active_lock)
 		TDB_LOG((tdb, TDB_DEBUG_FATAL, "tdb_reopen: open failed (%s)\n", strerror(errno)));
 		goto fail;
 	}
+	/*
+	 * We only use st.st_dev and st.st_ino from the raw fstat()
+	 * call, everything else needs to use tdb_fstat() in order
+	 * to skip tdb->hdr_ofs!
+	 */
 	if (fstat(tdb->fd, &st) != 0) {
 		TDB_LOG((tdb, TDB_DEBUG_FATAL, "tdb_reopen: fstat failed (%s)\n", strerror(errno)));
 		goto fail;
@@ -587,7 +871,16 @@ static int tdb_reopen_internal(struct tdb_context *tdb, bool active_lock)
 		TDB_LOG((tdb, TDB_DEBUG_FATAL, "tdb_reopen: file dev/inode has changed!\n"));
 		goto fail;
 	}
-	if (tdb_mmap(tdb) != 0) {
+	ZERO_STRUCT(st);
+
+	/*
+	 * We had tdb_mmap(tdb) here before,
+	 * but we need to use tdb_fstat(),
+	 * which is triggered from tdb_oob() before calling tdb_mmap().
+	 * As this skips tdb->hdr_ofs.
+	 */
+	tdb->map_size = 0;
+	if (tdb->methods->tdb_oob(tdb, 0, 1, 0) != 0) {
 		goto fail;
 	}
 #endif /* fake pread or pwrite */
@@ -595,6 +888,7 @@ static int tdb_reopen_internal(struct tdb_context *tdb, bool active_lock)
 	/* We may still think we hold the active lock. */
 	tdb->num_lockrecs = 0;
 	SAFE_FREE(tdb->lockrecs);
+	tdb->lockrecs_array_length = 0;
 
 	if (active_lock && tdb_nest_lock(tdb, ACTIVE_LOCK, F_RDLCK, TDB_LOCK_WAIT) == -1) {
 		TDB_LOG((tdb, TDB_DEBUG_FATAL, "tdb_reopen: failed to obtain active lock\n"));

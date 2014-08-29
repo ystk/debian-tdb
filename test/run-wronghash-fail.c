@@ -9,9 +9,9 @@
 #include "../common/open.c"
 #include "../common/check.c"
 #include "../common/hash.c"
+#include "../common/mutex.c"
 #include "tap-interface.h"
 #include <stdlib.h>
-#include <err.h>
 
 static void log_fn(struct tdb_context *tdb, enum tdb_debug_level level, const char *fmt, ...)
 {
@@ -35,7 +35,7 @@ int main(int argc, char *argv[])
 			  O_CREAT|O_RDWR|O_TRUNC, 0600, &log_ctx, NULL);
 	ok1(tdb);
 	ok1(log_count == 0);
-	d.dptr = (void *)"Hello";
+	d.dptr = discard_const_p(uint8_t, "Hello");
 	d.dsize = 5;
 	ok1(tdb_store(tdb, d, d, TDB_INSERT) == 0);
 	tdb_close(tdb);

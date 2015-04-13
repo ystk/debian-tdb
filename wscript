@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 APPNAME = 'tdb'
-VERSION = '1.3.0'
+VERSION = '1.3.1'
 
 blddir = 'bin'
 
@@ -10,7 +10,7 @@ import sys, os
 # find the buildtools directory
 srcdir = '.'
 while not os.path.exists(srcdir+'/buildtools') and len(srcdir.split('/')) < 5:
-    srcdir = '../' + srcdir
+    srcdir = srcdir + '/..'
 sys.path.insert(0, srcdir + '/buildtools/wafsamba')
 
 import wafsamba, samba_dist, Options, Logs

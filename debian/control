@@ -4,13 +4,14 @@ Priority: optional
 Maintainer: Debian Samba Maintainers <pkg-samba-maint@lists.alioth.debian.org>
 Uploaders: Jelmer Vernooij <jelmer@debian.org>
 Build-Depends: debhelper (>= 8.1.3),
+               dh-python,
                docbook-xml,
                docbook-xsl,
                python-all-dbg (>= 2.6.6-3),
                python-all-dev (>= 2.6.6-3),
                xsltproc
 Homepage: http://tdb.samba.org/
-Standards-Version: 3.9.5
+Standards-Version: 3.9.6
 Vcs-Git: git://anonscm.debian.org/pkg-samba/tdb.git -b unstable
 XS-Testsuite: autopkgtest
 
@@ -53,6 +54,7 @@ Description: Trivial Database - development files
  This package contains the development files.
 
 Package: libtdb1-dbg
+Multi-Arch: same
 Section: debug
 Architecture: linux-any kfreebsd-any
 Priority: extra

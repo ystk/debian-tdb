@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 APPNAME = 'tdb'
-VERSION = '1.3.1'
+VERSION = '1.3.6'
 
 blddir = 'bin'
 
@@ -15,7 +15,7 @@ sys.path.insert(0, srcdir + '/buildtools/wafsamba')
 
 import wafsamba, samba_dist, Options, Logs
 
-samba_dist.DIST_DIRS('lib/tdb:. lib/replace:lib/replace buildtools:buildtools')
+samba_dist.DIST_DIRS('lib/tdb:. lib/replace:lib/replace buildtools:buildtools third_party/waf:third_party/waf')
 
 tdb1_unit_tests = [
     'run-3G-file',
@@ -46,6 +46,7 @@ tdb1_unit_tests = [
     'run-mutex-allrecord-bench',
     'run-mutex-allrecord-trylock',
     'run-mutex-allrecord-block',
+    'run-mutex-transaction1',
     'run-mutex-die',
     'run-mutex1',
 ]
@@ -164,17 +165,18 @@ def build(bld):
                          'tools/tdbtool.c',
                          'tdb', manpages='man/tdbtool.8')
 
-        # FIXME: This hardcoded list is stupid, stupid, stupid.
-        bld.SAMBA_SUBSYSTEM('tdb-test-helpers',
-                            'test/external-agent.c test/lock-tracking.c test/logging.c',
-                            tdb_deps,
-                            includes='include')
+        if bld.env.standalone_tdb:
+            # FIXME: This hardcoded list is stupid, stupid, stupid.
+            bld.SAMBA_SUBSYSTEM('tdb-test-helpers',
+                                'test/external-agent.c test/lock-tracking.c test/logging.c',
+                                tdb_deps,
+                                includes='include')
 
-        for t in tdb1_unit_tests:
-            b = "tdb1-" + t
-            s = "test/" + t + ".c"
-            bld.SAMBA_BINARY(b, s, 'replace tdb-test-helpers',
-                             includes='include', install=False)
+            for t in tdb1_unit_tests:
+                b = "tdb1-" + t
+                s = "test/" + t + ".c"
+                bld.SAMBA_BINARY(b, s, 'replace tdb-test-helpers',
+                                 includes='include', install=False)
 
     if not bld.CONFIG_SET('USING_SYSTEM_PYTDB'):
         bld.SAMBA_PYTHON('pytdb',
